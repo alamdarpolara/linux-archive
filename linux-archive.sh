@@ -1460,3 +1460,64 @@ z_fail() {   # z_fail <message>: remove the partial output and report
     Z_TMP="" PARTIAL_PATH="" CUR_OP=""
     msg_info "The partial archive was deleted; nothing was written to this folder."
 }
+
+z_run() {
+    local orig=0 arcsz saved pct enc="none" t0 t1 warn_ok
+    Z_TMP=$(mktemp -d ./.linux-archive.XXXXXX) || { msg_err "Cannot create a temporary folder here (is the folder writable?)"; return 1; }
+    PARTIAL_PATH=$Z_TMP
+    Z_ARC="$Z_TMP/archive$Z_EXT"
+    z_build_cmd
+    screen_begin "ZIP  -  creating $(disp "$Z_NAME")"
+    CUR_OP=create
+    t0=$SECONDS
+    JOB_STDOUT_FILE=$Z_STDOUT
+    JOB_SIZE_FILE=$Z_ARC
+    # p7zip 16.02 (EPEL 8/9) asks "Enter password" AND "Verify password" when
+    # creating; 7-Zip >= 21 asks once and ignores the extra line (verified).
+    if [[ -n $Z_PW ]]; then JOB_SECRET=$Z_PW$'\n'$Z_PW; else JOB_SECRET=""; fi
+    run_job "Creating $Z_NAME" "${Z_CMD[@]}"
+    # Exit code 1 means "warning" for 7z/tar/mksquashfs; for Info-ZIP any
+    # non-zero code means something was not archived.
+    warn_ok=1
+    [[ $Z_FMT == zip && -z $Z_PW ]] && warn_ok=0
+    if (( JOB_RC > warn_ok )); then
+        z_fail "Creating the archive failed (exit code $JOB_RC)."
+        return 1
+    fi
+    if (( JOB_RC == 1 )); then
+        msg_warn "The tool reported warnings (some files may have changed or been unreadable):"
+        job_log_show 4
+    fi
+    if [[ ! -s $Z_ARC ]]; then z_fail "The tool produced no output."; return 1; fi
+    if ! z_test_archive; then
+        z_fail "The integrity test of the new archive FAILED."
+        return 1
+    fi
+    # Atomic move into place (only now does an existing file get replaced).
+    z_commit || return 1
+    rm -rf -- "$Z_TMP"
+    Z_TMP="" PARTIAL_PATH="" CUR_OP=""
+    t1=$SECONDS
+    orig=$(tree_bytes "${Z_ITEMS[@]}")
+    arcsz=$(file_size "./$Z_NAME")
+    if (( orig > 0 )); then
+        saved=$(( orig - arcsz ))
+        if (( saved >= 0 )); then pct="$(( saved * 100 / orig ))% smaller"; else pct="$(( -saved * 100 / orig ))% larger"; fi
+    else pct="n/a"; fi
+    if [[ -n $Z_PW ]]; then
+        enc="AES-256"
+        [[ $Z_FMT == 7z ]] && enc+=", file names encrypted"
+    fi
+    msg_ok "Archive created and verified."
+    echo
+    box_print "Result" \
+        "File:       $Z_NAME" \
+        "Format:     $Z_FMT   level: $Z_LVLNAME" \
+        "Encryption: $enc" \
+        "Original:   $(human "$orig")  (sum of file sizes)" \
+        "Archive:    $(human "$arcsz")  ($pct)" \
+        "Time:       $(( t1 - t0 )) s" \
+        "Integrity:  test passed"
+    echo
+    return 0
+}

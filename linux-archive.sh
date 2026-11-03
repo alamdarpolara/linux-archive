@@ -1318,3 +1318,59 @@ z_pick_password() {
     fi
     return 0
 }
+
+z_default_name() {
+    local base
+    if (( ${#Z_ITEMS[@]} == 1 )); then
+        base=${Z_ITEMS[0]#./}
+        if [[ $Z_FMT == gz || $Z_FMT == xz || $Z_FMT == zst ]]; then
+            printf '%s%s' "$base" "$Z_EXT"; return
+        fi
+        base=${base#"${base%%[!.]*}"}            # drop leading dots
+    else
+        base=${PWD##*/}
+    fi
+    [[ -n $base ]] || base=archive
+    base=${base//[[:cntrl:]]/_}
+    printf '%s%s' "$base" "$Z_EXT"
+}
+
+# Output name + Overwrite / Rename / Skip.  Returns 1 = back, 2 = skipped.
+z_pick_output() {
+    local name def item
+    local -a l=("Overwrite" "Rename" "Skip (do not create the archive)") d=("replace the existing file" "choose another name" "back to the main menu")
+    def=$(z_default_name)
+    while :; do
+        screen_begin "ZIP  -  step 5: output file name"
+        ask_text "Archive name" "$def"
+        name=$ASK_RESULT
+        [[ -z $name ]] && return 1
+        if [[ ${name,,} != *"$Z_EXT" ]]; then name+=$Z_EXT; fi
+        if ! valid_name "$name"; then defer_warn "Invalid file name (no '/', no control characters)."; def=$(z_default_name); continue; fi
+        for item in "${Z_ITEMS[@]}"; do
+            if [[ ${item#./} == "$name" ]]; then
+                defer_warn "The archive cannot have the same name as a selected item."
+                name=""; break
+            fi
+        done
+        [[ -z $name ]] && continue
+        Z_OVERWRITE=0
+        if ! path_exists "./$name"; then Z_NAME=$name; return 0; fi
+        if [[ -L ./$name ]]; then
+            # Never write to a pre-created symlink (it could point anywhere).
+            defer_warn "'$(disp "$name")' is a symbolic link - refused, choose another name."
+            def=$(unique_name "${name%"$Z_EXT"}" "$Z_EXT"); continue
+        fi
+        if [[ -d ./$name ]]; then
+            defer_warn "'$(disp "$name")' is an existing folder - choose another name."
+            def=$(unique_name "${name%"$Z_EXT"}" "$Z_EXT"); continue
+        fi
+        screen_begin "ZIP  -  '$(disp "$name")' already exists"
+        menu_single "File exists" "What do you want to do?" l d 1 || { def=$name; continue; }
+        case $MENU_INDEX in
+            0) Z_NAME=$name; Z_OVERWRITE=1; return 0 ;;
+            1) def=$(unique_name "${name%"$Z_EXT"}" "$Z_EXT") ;;
+            2) return 2 ;;
+        esac
+    done
+}

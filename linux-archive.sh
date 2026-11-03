@@ -972,6 +972,99 @@ pause_key() {
     printf '\n'
 }
 
+# ============================================================== job runner
+# run_job <label> <command...>
+#   * runs the command in its own session (setsid): no /dev/tty, own process
+#     group so kill_job can stop the whole tree on Ctrl+C;
+#   * STDIN is /dev/null, or - when JOB_SECRET is set - a pipe carrying the
+#     secret and nothing else.  The secret is therefore never in argv, never
+#     in the environment (JOB_SECRET is not exported) and never on disk;
+#   * STDOUT/STDERR go to $JOB_LOG (STDOUT to JOB_STDOUT_FILE if given);
+#   * JOB_WATCH_DIR/JOB_WATCH_LIMIT abort the job when the directory grows
+#     beyond the limit (zip-bomb / full-disk protection);
+#   * JOB_SIZE_FILE is shown as a growing size next to the spinner.
+# Result: JOB_RC (99 when aborted by the watchdog), JOB_ABORT ("" | limit).
+run_job() {
+    local label=$1 out start now elapsed=0 tick=0 frame=0 sz size_txt="" shown=0
+    local -a frames
+    shift
+    if (( UI_UTF8 )); then frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); else frames=('|' '/' '-' $'\\'); fi
+    JOB_LOG="$WORKDIR/job.log"
+    : >"$JOB_LOG"
+    JOB_ABORT=""
+    out=${JOB_STDOUT_FILE:-$JOB_LOG}
+    # Optional wall-clock limit (coreutils timeout(1): -k sends KILL after TERM).
+    if [[ -n $JOB_TIMEOUT ]] && have timeout; then
+        set -- timeout -k 5 "$JOB_TIMEOUT" "$@"
+    fi
+    # The secret travels through a pipe from the builtin printf (no argv, no
+    # environment, no here-string: bash < 5.1 backs here-strings/heredocs with
+    # temp files).  Callers hold secret_on, so xtrace is off here.
+    if [[ -n $JOB_SECRET ]]; then
+        printf '%s\n' "$JOB_SECRET" | setsid "$@" >>"$out" 2>>"$JOB_LOG" &
+    else
+        setsid "$@" </dev/null >>"$out" 2>>"$JOB_LOG" &
+    fi
+    JOB_PID=$!
+    JOB_SECRET=""
+    start=$SECONDS
+    [[ $UI_MODE == tui ]] && printf '%s' "$T_CIVIS"
+    while kill -0 "$JOB_PID" 2>/dev/null; do
+        now=$SECONDS
+        elapsed=$(( now - start ))
+        tick=$(( tick + 1 ))
+        if [[ -n $JOB_WATCH_DIR ]] && (( tick % 3 == 0 )); then
+            # Disk usage in KiB (portable `du -s -k`): what fills the disk.
+            sz=$(du -s -k -- "$JOB_WATCH_DIR" 2>/dev/null | cut -f1)
+            [[ $sz =~ ^[0-9]+$ ]] && sz=$(( sz * 1024 ))
+            if [[ $sz =~ ^[0-9]+$ ]] && (( sz > JOB_WATCH_LIMIT )); then
+                JOB_ABORT=limit
+                kill_job
+                break
+            fi
+        fi
+        if [[ -n $JOB_SIZE_FILE ]] && (( tick % 4 == 0 )); then
+            size_txt=$(human "$(file_size "$JOB_SIZE_FILE")")
+        elif [[ -n $JOB_WATCH_DIR ]] && (( tick % 3 == 0 )); then
+            size_txt=$(human "${sz:-0}")
+        fi
+        if [[ $UI_MODE == tui ]]; then
+            if (( elapsed >= 1 || tick > 5 )); then
+                frame=$(( (frame + 1) % ${#frames[@]} ))
+                printf '\r%s%s%s %s  %s%ds  %s%s%s' "$C_ACC" "${frames[frame]}" "$C_RST" "$label" "$C_DIM" "$elapsed" "$size_txt" "$C_RST" "$T_EL"
+                shown=1
+            fi
+        elif (( ! shown && elapsed >= 2 )); then
+            printf '%s ...\n' "$label"
+            shown=1
+        fi
+        sleep 0.1
+    done
+    if [[ -n $JOB_PID ]]; then
+        wait "$JOB_PID" 2>/dev/null
+        JOB_RC=$?
+        JOB_PID=""
+    fi
+    if [[ -n $JOB_ABORT ]]; then JOB_RC=99; fi
+    JOB_STDOUT_FILE="" JOB_WATCH_DIR="" JOB_WATCH_LIMIT=0 JOB_SIZE_FILE="" JOB_TIMEOUT=""
+    if [[ $UI_MODE == tui ]]; then
+        (( shown )) && printf '\r%s' "$T_EL"
+        printf '%s' "$T_CNORM"
+    fi
+    return 0
+}
+
+job_log_has() { grep -qE -- "$1" "$JOB_LOG" 2>/dev/null; }
+
+# Print the interesting part of the last job's log (sanitised).
+job_log_show() {
+    local n=${1:-6} line
+    while IFS= read -r line; do
+        [[ -z $line ]] && continue
+        printf '   %s%s%s\n' "$C_DIM" "$(disp "$line")" "$C_RST"
+    done < <(grep -vE '^[[:space:]]*$|^7-Zip|^Scanning|^Enter password' "$JOB_LOG" 2>/dev/null | tail -n "$n")
+}
+
 # The tool's own scratch/staging/trash folders (mktemp ./.linux-archive.XXXXXX).
 # One rule shared by the pickers and the direct argv route: such a name is never
 # a selectable item or archive.

@@ -1172,3 +1172,37 @@ fmt_levels() {
     esac
     return 0
 }
+
+# ---- steps ---------------------------------------------------------------
+z_pick_mode() {
+    local -a l=("Single item   - one file or folder" "Multiple items - tick several with Space")
+    screen_begin "ZIP  -  step 1: selection mode"
+    menu_single "Selection mode" "How many items do you want to put in the archive?" l NOARR 0 || return 1
+    if (( MENU_INDEX == 0 )); then Z_SELMODE=single; else Z_SELMODE=multi; fi
+}
+
+z_pick_items() {
+    local i
+    Z_ITEMS=()
+    list_cwd
+    if (( ${#CWD_NAMES[@]} == 0 )); then
+        screen_begin "ZIP"
+        msg_warn "This folder is empty - nothing to compress."
+        pause_key
+        return 1
+    fi
+    if [[ $Z_SELMODE == single ]]; then
+        menu_single "Choose the item to compress" "Enter = select   (folders are included recursively)" CWD_LABELS CWD_DETAILS 0 || return 1
+        Z_ITEMS=("./${CWD_NAMES[MENU_INDEX]}")
+    else
+        menu_multi "Choose the items to compress" "Space = toggle   a = all   Enter = confirm" CWD_LABELS CWD_DETAILS || return 1
+        for (( i = 0; i < ${#CWD_NAMES[@]}; i++ )); do
+            (( MENU_CHECKED[i] )) && Z_ITEMS+=("./${CWD_NAMES[i]}")
+        done
+    fi
+    return 0
+}
+
+z_single_regular_file() {   # exactly one selected item and it is a regular file
+    (( ${#Z_ITEMS[@]} == 1 )) && [[ -f ${Z_ITEMS[0]} && ! -L ${Z_ITEMS[0]} ]]
+}

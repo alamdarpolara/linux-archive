@@ -179,3 +179,84 @@ setup_locale() {
 
 # ---------------------------------------------------------- tool discovery
 have() { command -v "$1" >/dev/null 2>&1; }
+
+find_7z() {
+    local c out
+    for c in 7zz 7z 7za; do
+        if have "$c"; then
+            SZ=$(command -v "$c")
+            break
+        fi
+    done
+    [[ -n $SZ ]] || return 1
+    # -snl needs 7-Zip >= 21; very old p7zip (16.x) would reject it.
+    SZ_LINK=(-snl)
+    out=$("$SZ" i 2>&1 </dev/null)
+    if [[ ${out:0:300} =~ ([0-9]+)\.[0-9]+ ]] && (( BASH_REMATCH[1] < 21 )); then
+        SZ_LINK=()
+    fi
+    # `7z i` lists formats, then "Codecs:".  The RAR *format* is always listed;
+    # only builds that ship the (non-free) unRAR code have a "Rar5" CODEC
+    # (Arch: yes; Debian/Ubuntu: no - verified with `7z i`).
+    local codecs=""
+    [[ $out == *Codecs:* ]] && codecs=${out#*Codecs:}
+    codecs=${codecs%%Hashers:*}
+    if [[ $codecs == *" Rar5"* ]]; then SZ_RAR=1; fi
+    return 0
+}
+
+# Debian's `unrar` name can be the non-free RAR tool or an alternative that
+# points to unrar-free.  The real one prints "UNRAR x.xx freeware".
+find_unrar() {
+    local c out
+    for c in unrar unrar-nonfree; do
+        have "$c" || continue
+        out=$("$c" 2>&1 </dev/null | head -n 3)
+        if [[ $out == *UNRAR* ]]; then
+            UNRAR=$(command -v "$c")
+            break
+        fi
+    done
+    if have unrar-free; then
+        UNRAR_FREE=$(command -v unrar-free)
+    fi
+    if have unar && have lsar; then
+        UNAR=$(command -v unar) LSAR=$(command -v lsar)
+    fi
+}
+
+# Best available RAR extractor.  Only unrar and 7-Zip can take a password
+# without argv (stdin).  unar accepts a password only as `-p <pw>` (argv) and
+# bsdtar only via --passphrase (argv) or /dev/tty, so those two - and
+# unrar-free, which cannot decrypt - are used for unencrypted RAR only.
+pick_rar_backend() {
+    if [[ -n $UNRAR ]]; then RAR_BACKEND=unrar
+    elif [[ -n $SZ ]] && (( SZ_RAR )); then RAR_BACKEND=7z
+    elif [[ -n $UNAR ]]; then RAR_BACKEND=unar
+    elif [[ -n $UNRAR_FREE ]]; then RAR_BACKEND=unrar-free
+    elif have bsdtar; then RAR_BACKEND=bsdtar
+    else RAR_BACKEND=""; fi
+}
+rar_backend_decrypts() { [[ $RAR_BACKEND == unrar || $RAR_BACKEND == 7z ]]; }
+
+# Read-only peek at /etc/os-release (never sourced): distro family for hints.
+os_family() {
+    local line id="" like=""
+    if [[ -r /etc/os-release ]]; then
+        while IFS= read -r line; do
+            case $line in
+                ID=*) id=${line#ID=} ;;
+                ID_LIKE=*) like=${line#ID_LIKE=} ;;
+            esac
+        done </etc/os-release
+    fi
+    id=${id//\"/} like=${like//\"/}
+    case " $id $like " in
+        *" alpine "*) echo alpine ;;
+        *" arch "*) echo arch ;;
+        *" suse "*|*" opensuse "*|*opensuse*) echo suse ;;
+        *" debian "*|*" ubuntu "*) echo debian ;;
+        *" fedora "*|*" rhel "*|*" centos "*) echo fedora ;;
+        *) echo unknown ;;
+    esac
+}

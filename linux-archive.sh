@@ -701,6 +701,98 @@ box_print() {   # box_print <title> <line>...
 
 # ------------------------------------------------------------------ input
 # read_key -> $KEY in: UP DOWN LEFT RIGHT ENTER SPACE ESC BACK HOME END PGUP
+# PGDN, a literal character, or "" after the poll timeout (used to notice
+# SIGWINCH).  Returns 1 on end of input.
+read_key() {
+    KEY=""
+    local k="" c rest="" rc last
+    IFS= read -rsn1 -t 0.4 k
+    rc=$?
+    if (( rc > 128 )); then return 0; fi
+    if (( rc != 0 )); then return 1; fi
+    case $k in
+        '')       KEY=ENTER ;;
+        $'\r')    KEY=ENTER ;;
+        ' ')      KEY=SPACE ;;
+        $'\x7f'|$'\b') KEY=BACK ;;
+        $'\e')
+            while IFS= read -rsn1 -t 0.03 c; do
+                rest+=$c
+                if [[ $c == [A-Za-z~] ]] && (( ${#rest} >= 2 )); then break; fi
+            done
+            if [[ -z $rest ]]; then KEY=ESC; return 0; fi
+            last=${rest: -1}
+            case $last in
+                A) KEY=UP ;;
+                B) KEY=DOWN ;;
+                C) KEY=RIGHT ;;
+                D) KEY=LEFT ;;
+                H) KEY=HOME ;;
+                F) KEY=END ;;
+                '~') case $rest in
+                        '[5~') KEY=PGUP ;;
+                        '[6~') KEY=PGDN ;;
+                        '[1~'|'[7~') KEY=HOME ;;
+                        '[4~'|'[8~') KEY=END ;;
+                    esac ;;
+            esac
+            ;;
+        *) KEY=$k ;;
+    esac
+    return 0
+}
+
+die_eof() { EXIT_MSG="Input closed - exiting."; exit 1; }
+
+menu_plain() {
+    local mode=$1 title=$2 info=$3
+    local -n _L=$4
+    local -n _D=$5
+    local n=${#_L[@]} i line tok a b ok
+    local -a toks
+    MENU_CHECKED=()
+    for (( i = 0; i < n; i++ )); do MENU_CHECKED[i]=0; done
+    while :; do
+        for line in "${SCREEN_LINES[@]}"; do printf '%s\n' "$line"; done
+        printf '\n%s%s%s\n' "$C_BOLD" "$title" "$C_RST"
+        [[ -n $info ]] && printf '%s%s%s\n' "$C_DIM" "$info" "$C_RST"
+        for (( i = 0; i < n; i++ )); do
+            printf ' %3d) %s' $(( i + 1 )) "$(disp "${_L[i]}")"
+            [[ -n ${_D[i]:-} ]] && printf '   %s%s%s' "$C_DIM" "$(disp "${_D[i]}")" "$C_RST"
+            printf '\n'
+        done
+        if [[ $mode == single ]]; then
+            printf 'Choose 1-%d  (q = back): ' "$n"
+        else
+            printf 'Choose numbers e.g. "1 3 5-7", a = all, q = back: '
+        fi
+        IFS= read -r line || die_eof
+        line=${line//,/ }
+        [[ $line == [qQ] ]] && return 1
+        if [[ $mode == single ]]; then
+            if [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]] && (( BASH_REMATCH[1] >= 1 && BASH_REMATCH[1] <= n )); then
+                MENU_INDEX=$(( BASH_REMATCH[1] - 1 )); return 0
+            fi
+        else
+            for (( i = 0; i < n; i++ )); do MENU_CHECKED[i]=0; done
+            ok=1
+            if [[ $line == [aA] ]]; then
+                for (( i = 0; i < n; i++ )); do MENU_CHECKED[i]=1; done
+            else
+                read -r -a toks <<<"$line"
+                for tok in "${toks[@]}"; do
+                    if [[ $tok =~ ^([0-9]+)-([0-9]+)$ ]]; then a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+                    elif [[ $tok =~ ^[0-9]+$ ]]; then a=$tok b=$tok
+                    else ok=0; break; fi
+                    if (( a < 1 || b > n || a > b )); then ok=0; break; fi
+                    for (( i = a - 1; i < b; i++ )); do MENU_CHECKED[i]=1; done
+                done
+            fi
+            if (( ok )) && [[ ${MENU_CHECKED[*]} == *1* ]]; then return 0; fi
+        fi
+        msg_warn "Invalid choice."
+    done
+}
 # The tool's own scratch/staging/trash folders (mktemp ./.linux-archive.XXXXXX).
 # One rule shared by the pickers and the direct argv route: such a name is never
 # a selectable item or archive.

@@ -1255,3 +1255,66 @@ z_items_summary() {
         printf '%d items (%s ...)' "${#Z_ITEMS[@]}" "$(disp "${Z_ITEMS[0]#./}")"
     fi
 }
+
+z_pick_level() {
+    Z_LVL="" Z_LVLNAME="default"
+    fmt_levels "$Z_FMT" || return 0          # no levels for this format
+    screen_begin "ZIP  -  step 3: compression level"
+    menu_single "Compression level" "Higher = smaller file but slower" LV_LABELS NOARR "$LV_DEF" || return 1
+    Z_LVL=${LV_VALUES[MENU_INDEX]}
+    Z_LVLNAME=${LV_LABELS[MENU_INDEX]}
+    return 0
+}
+
+z_password_is_ascii() {   # printable ASCII only (checked bytewise)
+    local LC_ALL=C
+    [[ $1 != *[![:print:]]* ]]
+}
+
+z_ask_new_password() {   # sets Z_PW; returns 1 if the user gives up
+    local p1 p2 tries=0
+    while (( tries < 3 )); do
+        tries=$(( tries + 1 ))
+        ask_secret "Enter password (hidden): " || return 1
+        p1=$SECRET_IN
+        if [[ -z $p1 ]]; then msg_warn "An empty password is not allowed."; continue; fi
+        ask_secret "Repeat password:         " || return 1
+        p2=$SECRET_IN
+        if [[ $p1 != "$p2" ]]; then msg_warn "The passwords do not match."; continue; fi
+        if [[ $Z_FMT == zip ]] && ! z_password_is_ascii "$p1"; then
+            msg_warn "7-Zip supports only plain ASCII characters in ZIP passwords (no accents/umlauts/CJK)."
+            msg_warn "Use an ASCII password, or choose the 7z format which accepts any characters."
+            continue
+        fi
+        if (( ${#p1} < 8 )); then msg_warn "Short password (< 8 characters) - consider a longer one."; fi
+        Z_PW=$p1
+        wipe_var p1; wipe_var p2; SECRET_IN=""
+        return 0
+    done
+    wipe_var p1; wipe_var p2; SECRET_IN=""
+    msg_err "Too many failed attempts."
+    return 1
+}
+
+# Wipe the ZIP password and leave secret mode (restores xtrace if it was on).
+forget_zpw() { wipe_var Z_PW; Z_PW=""; secret_off; }
+
+z_pick_password() {
+    local -a l=("No password" "Protect with a password")
+    forget_zpw
+    case $Z_FMT in zip|7z) ;; *) return 0 ;; esac
+    screen_begin "ZIP  -  step 4: password protection"
+    if [[ $Z_FMT == zip ]]; then
+        ui_note_info "ZIP passwords use AES-256 (created with 7-Zip). Windows/WinZip/7-Zip open it;"
+        ui_note_info "the old Info-ZIP 'unzip' cannot. Weak legacy ZipCrypto is never used."
+    else
+        ui_note_info "7z passwords use AES-256 and the file NAMES are encrypted too (-mhe=on)."
+    fi
+    menu_single "Password protection" "Encrypt the archive?" l NOARR 0 || return 1
+    if (( MENU_INDEX == 1 )); then
+        [[ -n $SZ ]] || { msg_err "7-Zip is needed for password protection (sudo ./install.sh)."; pause_key; return 1; }
+        secret_on
+        z_ask_new_password || { forget_zpw; pause_key; return 1; }
+    fi
+    return 0
+}

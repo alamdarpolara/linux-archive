@@ -410,7 +410,164 @@ print_verify() {
     return 0
 }
 
+# ----------------------------------------------------------- small helpers
+# Wipe a secret variable (by name) before unsetting it.
+wipe_var() {
+    local -n _wv=$1
+    _wv=${_wv:-}
+    _wv=${_wv//?/0}
+    _wv=""
+    unset -n _wv
+    unset -v "$1"
+}
+
+human() {   # bytes -> "12.3 MiB"
+    local b=${1:-0} i=0 v unit
+    local -a u=(B KiB MiB GiB TiB PiB)
+    if (( b < 1024 )); then printf '%d B' "$b"; return; fi
+    v=$(( b * 10 ))
+    while (( v >= 10240 && i < 5 )); do v=$(( v / 1024 )); i=$(( i + 1 )); done
+    unit=${u[$i]}
+    printf '%d.%d %s' $(( v / 10 )) $(( v % 10 )) "$unit"
+}
+
+free_bytes() {   # free bytes on the filesystem holding $1
+    # POSIX output format (df -P -k): 1024-byte blocks, available = field 4.
+    local a line
+    line=$(df -P -k -- "$1" 2>/dev/null | tail -n 1)
+    read -r _ _ _ a _ <<<"$line"
+    [[ $a =~ ^[0-9]+$ ]] || a=0
+    printf '%s' $(( a * 1024 ))
+}
+
+file_size() {   # size of one file in bytes
+    local s
+    s=$(stat -c %s -- "$1" 2>/dev/null) || s=0
+    printf '%s' "$s"
+}
+
+# Total bytes of regular files below the given paths (does not follow links).
+tree_bytes() {
+    local t=0 n
+    while IFS= read -r n; do t=$(( t + n )); done < <(find "$@" -type f -printf '%s\n' 2>/dev/null)
+    printf '%d' "$t"
+}
+
+# Printable, single-line version of an arbitrary file name (control chars and
+# escape sequences must never reach the terminal).
+# U+200E U+200F U+202A..U+202E U+2066..U+2069 as raw UTF-8 bytes (locale-independent).
+readonly BIDI_SET=$'\xe2\x80\x8e\xe2\x80\x8f\xe2\x80\xaa\xe2\x80\xab\xe2\x80\xac\xe2\x80\xad\xe2\x80\xae\xe2\x81\xa6\xe2\x81\xa7\xe2\x81\xa8\xe2\x81\xa9'
+disp() {
+    local s=$1
+    s=${s//[[:cntrl:]]/?}
+    # Bidirectional overrides/isolates can make a name look like another one
+    # ("Trojan Source", CVE-2021-42574); show them as '?' too.
+    # (Only in a UTF-8 locale: there each byte sequence below is one character.)
+    if (( UI_UTF8 )) || [[ ${LC_ALL:-} == *[Uu][Tt][Ff]* ]]; then
+        s=${s//[$BIDI_SET]/?}
+    fi
+    printf '%s' "$s"
+}
+
+repeat() {   # repeat string count
+    local out="" i
+    for (( i = 0; i < $2; i++ )); do out+=$1; done
+    printf '%s' "$out"
+}
+
+# A name that is safe to create in the current directory.
+valid_name() {
+    local n=$1
+    [[ -n $n && $n != . && $n != .. && $n != */* ]] || return 1
+    [[ $n != *[[:cntrl:]]* ]] || return 1
+    (( ${#n} <= 200 )) || return 1
+    return 0
+}
+
+path_exists() { [[ -e $1 || -L $1 ]]; }
+
+# Serialise the final "check + rename" step of concurrent linux-archive runs
+# in the current directory: flock(1) on a read-only descriptor of the
+# directory itself (flock(2) works on directories; no lock file is created).
+dir_lock() {
+    exec {LOCK_FD}<"." || { LOCK_FD=""; return 1; }
+    if ! flock -w 20 "$LOCK_FD"; then
+        exec {LOCK_FD}<&-
+        LOCK_FD=""
+        return 1
+    fi
+    return 0
+}
+dir_unlock() {
+    if [[ -n $LOCK_FD ]]; then exec {LOCK_FD}<&-; LOCK_FD=""; fi
+    return 0
+}
+
+# First free "<stem>_N<ext>" in the current directory.
+unique_name() {
+    local stem=$1 ext=$2 n=2
+    while path_exists "./${stem}_${n}${ext}"; do n=$(( n + 1 )); done
+    printf '%s_%s%s' "$stem" "$n" "$ext"
+}
+
+# ------------------------------------------------------ cleanup & signals
+kill_job() {
+    [[ -n $JOB_PID ]] || return 0
+    if kill -0 "$JOB_PID" 2>/dev/null; then
+        kill -TERM -- "-$JOB_PID" 2>/dev/null || kill -TERM "$JOB_PID" 2>/dev/null
+        local i
+        for i in 1 2 3 4 5; do
+            kill -0 "$JOB_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$JOB_PID" 2>/dev/null || true
+        wait "$JOB_PID" 2>/dev/null
+    fi
+    JOB_PID=""
+}
+
+# shellcheck disable=SC2329  # reached only from the trap handlers (cleanup, on_signal)
+restore_terminal() {
+    if [[ $UI_MODE == tui ]]; then
+        printf '%s%s' "${T_CNORM:-}" "${T_SGR0:-}"
+    fi
+    if [[ -n $SAVED_STTY ]]; then
+        stty "$SAVED_STTY" 2>/dev/null || stty sane 2>/dev/null || true
+    fi
+}
+
+# shellcheck disable=SC2329  # installed with `trap cleanup EXIT`
+cleanup() {
+    local rc=$?
+    trap - EXIT INT TERM HUP WINCH
+    kill_job
+    { set +x; } 2>/dev/null      # never trace while wiping secrets on exit
+    JOB_SECRET="" Z_PW="" A_PW="" SECRET_IN=""
+    if [[ -n $PARTIAL_PATH ]] && is_scratch_name "$PARTIAL_PATH" && path_exists "$PARTIAL_PATH"; then
+        rm -rf -- "$PARTIAL_PATH"
+    fi
+    if [[ -n $WORKDIR && -d $WORKDIR ]]; then rm -rf -- "$WORKDIR"; fi
+    restore_terminal
+    if [[ -n $EXIT_MSG ]]; then printf '\n%s\n' "$EXIT_MSG"; fi
+    exit "$rc"
+}
+
+# shellcheck disable=SC2329  # installed with `trap ... INT/TERM/HUP`
+on_signal() {   # on_signal <name> <exit-code>
+    trap '' INT TERM HUP
+    case $CUR_OP in
+        create)  EXIT_MSG="Interrupted ($1) - the partial archive was deleted." ;;
+        extract) EXIT_MSG="Interrupted ($1) - the partial extraction was deleted." ;;
+        *)       EXIT_MSG="Interrupted ($1)." ;;
+    esac
+    exit "$2"
+}
+
 msg_ok()   { printf '%s%s%s %s\n' "$C_OK" "$G_OK" "$C_RST" "$*"; }
 msg_err()  { printf '%s%s %s%s\n' "$C_ERR" "$G_ERR" "$*" "$C_RST"; }
 msg_warn() { printf '%s%s %s%s\n' "$C_WARN" "$G_WARN" "$*" "$C_RST"; }
 msg_info() { printf '%s%s%s %s\n' "$C_ACC" "$G_INFO" "$C_RST" "$*"; }
+# The tool's own scratch/staging/trash folders (mktemp ./.linux-archive.XXXXXX).
+# One rule shared by the pickers and the direct argv route: such a name is never
+# a selectable item or archive.
+is_scratch_name() { [[ ${1##*/} == .linux-archive.* ]]; }

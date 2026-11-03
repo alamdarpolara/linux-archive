@@ -1113,3 +1113,62 @@ list_cwd() {
         esac
     done
 }
+
+# ---- format / level tables ------------------------------------------------
+fmt_ext() {
+    case $1 in
+        zip) echo .zip ;; 7z) echo .7z ;; tar) echo .tar ;; tar.gz) echo .tar.gz ;;
+        tar.bz2) echo .tar.bz2 ;; tar.xz) echo .tar.xz ;; tar.zst) echo .tar.zst ;;
+        squashfs) echo .squashfs ;; gz) echo .gz ;; xz) echo .xz ;; zst) echo .zst ;;
+    esac
+}
+
+fmt_tools() {
+    case $1 in
+        zip) echo zip ;; 7z) echo 7z ;; tar) echo tar ;;
+        tar.gz) echo tar gzip ;; tar.bz2) echo tar bzip2 ;; tar.xz) echo tar xz ;;
+        tar.zst) echo tar zstd ;; squashfs) echo mksquashfs unsquashfs ;;
+        gz) echo gzip ;; xz) echo xz ;; zst) echo zstd ;;
+    esac
+}
+
+# Compression program tar runs for -I (create) - constant strings, no user data.
+# `tar -I PROG` runs PROG as the (de)compressor, adding -d when extracting
+# (info tar "Using Compression Program").  xz --memlimit-compress=50% is a
+# documented percentage limit (man xz); xz lowers threads/preset to fit it.
+fmt_tarprog() {
+    case $1 in
+        tar.gz) echo "gzip -$2" ;;
+        tar.bz2) echo "bzip2 -$2" ;;
+        tar.xz) echo "xz -T0 -$2 --memlimit-compress=50%" ;;
+        tar.zst) echo "zstd -q -T0 -$2" ;;
+    esac
+}
+
+# fmt_levels <fmt>: fills LV_LABELS / LV_VALUES / LV_DEF; returns 1 when the
+# format has no compression level (tar).  Flags verified with each tool's help:
+#   zip -0..-9 | 7z -mx=0..9 | gzip/bzip2 -1..-9 | xz -0..-9 | zstd -1..-19
+#   mksquashfs -comp gzip -Xcompression-level 1..9
+fmt_levels() {
+    LV_LABELS=() LV_VALUES=() LV_DEF=0
+    case $1 in
+        zip)  LV_LABELS=("Store - no compression (-0)" "Fastest (-1)" "Fast (-3)" "Normal (-6)" "Maximum (-9)")
+              LV_VALUES=(0 1 3 6 9) LV_DEF=3 ;;
+        7z)   LV_LABELS=("Store - no compression (-mx=0)" "Fastest (-mx=1)" "Fast (-mx=3)" "Normal (-mx=5)" "Maximum (-mx=7)" "Ultra (-mx=9)")
+              LV_VALUES=(0 1 3 5 7 9) LV_DEF=3 ;;
+        tar.gz|gz|tar.bz2)
+              LV_LABELS=("Fastest (-1)" "Fast (-3)" "Normal (-6)" "Maximum (-9)")
+              LV_VALUES=(1 3 6 9) LV_DEF=2 ;;
+        tar.xz|xz)
+              LV_LABELS=("Fastest (-0)" "Fast (-3)" "Normal (-6)" "Maximum (-9, needs much RAM)")
+              LV_VALUES=(0 3 6 9) LV_DEF=2 ;;
+        tar.zst|zst)
+              LV_LABELS=("Fastest (-1)" "Normal (-3)" "Good (-9)" "High (-15)" "Maximum (-19, slow)")
+              LV_VALUES=(1 3 9 15 19) LV_DEF=1 ;;
+        squashfs)
+              LV_LABELS=("Fastest (gzip level 1)" "Fast (gzip level 3)" "Normal (gzip level 6)" "Maximum (gzip level 9)")
+              LV_VALUES=(1 3 6 9) LV_DEF=3 ;;
+        *) return 1 ;;
+    esac
+    return 0
+}

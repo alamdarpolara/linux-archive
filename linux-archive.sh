@@ -744,6 +744,18 @@ read_key() {
 
 die_eof() { EXIT_MSG="Input closed - exiting."; exit 1; }
 
+# ------------------------------------------------------------------ menus
+# menu_single <title> <info> <labels-array> <details-array> [start-index]
+#   -> $MENU_INDEX ; returns 1 for back/quit
+# menu_multi  <title> <info> <labels-array> <details-array>
+#   -> MENU_CHECKED[i]=0/1 ; returns 1 for back/quit
+menu_single() { menu_run single "$@"; }
+menu_multi()  { menu_run multi "$@"; }
+
+menu_run() {
+    if [[ $UI_MODE == tui ]]; then menu_tui "$@"; else menu_plain "$@"; fi
+}
+
 menu_plain() {
     local mode=$1 title=$2 info=$3
     local -n _L=$4
@@ -793,6 +805,173 @@ menu_plain() {
         msg_warn "Invalid choice."
     done
 }
+
+menu_tui() {
+    local mode=$1 title=$2 info=$3
+    local -n L=$4
+    local -n D=$5
+    local n=${#L[@]} cur=${6:-0} top=0 vis i dv dw=0 lw inner step dirty=1 nn maxn ninfo=0
+    MENU_CHECKED=()
+    MENU_FLASH=""
+    [[ -n $info ]] && ninfo=1
+    for (( i = 0; i < n; i++ )); do
+        MENU_CHECKED[i]=0
+        dv=${D[i]:-}
+        (( ${#dv} > dw )) && dw=${#dv}
+    done
+    (( cur >= n )) && cur=0
+    printf '%s' "$T_CIVIS"
+    RESIZED=1
+    while :; do
+        if (( RESIZED )); then
+            # Clear the flag BEFORE measuring: a SIGWINCH that arrives while
+            # ui_layout runs sets it again and triggers one more redraw.
+            RESIZED=0; ui_layout; dirty=1
+            printf '%s' "$T_HOME$T_ED"
+        fi
+        if (( dirty )); then
+            inner=$(( BOXW - 2 ))
+            (( dw > inner / 2 )) && dw=$(( inner / 2 ))
+            # rows used besides notes and items: banner 4 + blank + title + [info] + 2 borders + flash + footer
+            nn=${#SCREEN_LINES[@]}
+            maxn=$(( ROWS - 11 - ninfo - (n < 3 ? n : 3) ))
+            (( maxn < 0 )) && maxn=0
+            (( nn > maxn )) && nn=$maxn
+            vis=$(( ROWS - 11 - ninfo - nn ))
+            (( vis < 3 )) && vis=3
+            (( vis > n )) && vis=$n
+            (( cur < top )) && top=$cur
+            (( cur >= top + vis )) && top=$(( cur - vis + 1 ))
+            menu_draw
+            dirty=0
+        fi
+        read_key || die_eof
+        [[ -z $KEY ]] && continue          # poll timeout: only checks RESIZED
+        dirty=1
+        MENU_FLASH=""
+        step=0
+        case $KEY in
+            UP|k)     (( cur > 0 )) && cur=$(( cur - 1 )) || cur=$(( n - 1 )) ;;
+            DOWN|j)   (( cur < n - 1 )) && cur=$(( cur + 1 )) || cur=0 ;;
+            PGUP)     cur=$(( cur - vis )); (( cur < 0 )) && cur=0 ;;
+            PGDN)     cur=$(( cur + vis )); (( cur >= n )) && cur=$(( n - 1 )) ;;
+            HOME|g)   cur=0 ;;
+            END|G)    cur=$(( n - 1 )) ;;
+            SPACE)
+                if [[ $mode == multi ]]; then MENU_CHECKED[cur]=$(( 1 - MENU_CHECKED[cur] ))
+                else step=1; fi ;;
+            a) if [[ $mode == multi ]]; then for (( i = 0; i < n; i++ )); do MENU_CHECKED[i]=1; done; fi ;;
+            n) if [[ $mode == multi ]]; then for (( i = 0; i < n; i++ )); do MENU_CHECKED[i]=0; done; fi ;;
+            i) if [[ $mode == multi ]]; then for (( i = 0; i < n; i++ )); do MENU_CHECKED[i]=$(( 1 - MENU_CHECKED[i] )); done; fi ;;
+            ENTER) step=1 ;;
+            RIGHT) [[ $mode == single ]] && step=1 ;;
+            q|Q|ESC|LEFT|BACK) printf '%s' "$T_CNORM"; return 1 ;;
+        esac
+        if (( step )); then
+            if [[ $mode == single ]]; then
+                MENU_INDEX=$cur; printf '%s' "$T_CNORM"; return 0
+            elif [[ ${MENU_CHECKED[*]} == *1* ]]; then
+                printf '%s' "$T_CNORM"; return 0
+            else
+                MENU_FLASH="Nothing selected - press Space on an item first."
+            fi
+        fi
+    done
+}
+
+MENU_FLASH=""
+
+menu_draw() {   # uses the caller's (menu_tui) locals through dynamic scope
+    local buf="" i row inner=$(( BOXW - 2 )) prefix lab detail style hl count
+    local plen=3
+    [[ $mode == multi ]] && plen=7
+    lw=$(( inner - plen - dw - (dw > 0 ? 1 : 0) ))
+    buf+=$T_HOME
+    buf+=${BANNER_BUF//$'\n'/$T_EL$'\n'}
+    buf+=$T_EL$'\n'
+    buf+="${C_BOLD}${title}${C_RST}${T_EL}"$'\n'
+    if (( ninfo )); then
+        fit "$info" "$(( BOXW - 1 ))"
+        buf+="${C_DIM}${FIT}${C_RST}${T_EL}"$'\n'
+    fi
+    for (( i = 0; i < nn; i++ )); do buf+="${SCREEN_LINES[i]}${T_EL}"$'\n'; done
+    count=" $(( top + 1 ))-$(( top + vis )) of $n "
+    (( n <= vis )) && count=""
+    hl=$(repeat "$G_H" $(( inner - ${#count} )))
+    buf+="${C_ACC}${G_TL}${count}${hl}${G_TR}${C_RST}${T_EL}"$'\n'
+    for (( i = top; i < top + vis; i++ )); do
+        if (( i == cur )); then prefix=" $G_PTR "; else prefix="   "; fi
+        if [[ $mode == multi ]]; then
+            if (( MENU_CHECKED[i] )); then prefix+="[x] "; else prefix+="[ ] "; fi
+        fi
+        lab=$(disp "${L[i]}")
+        fit "$lab" "$lw"; row="$prefix$FIT"
+        if (( dw > 0 )); then
+            detail=$(disp "${D[i]:-}")
+            fit "$detail" "$dw"; row+=" $FIT"
+        fi
+        fit "$row" "$inner"; row=$FIT
+        style=""
+        if (( i == cur )); then style=$C_REV$C_BOLD
+        elif [[ $mode == multi ]] && (( MENU_CHECKED[i] )); then style=$C_OK; fi
+        buf+="${C_ACC}${G_V}${C_RST}${style}${row}${C_RST}${C_ACC}${G_V}${C_RST}${T_EL}"$'\n'
+    done
+    hl=$(repeat "$G_H" "$inner")
+    buf+="${C_ACC}${G_BL}${hl}${G_BR}${C_RST}${T_EL}"$'\n'
+    buf+="${C_WARN}${MENU_FLASH}${C_RST}${T_EL}"$'\n'
+    if [[ $mode == multi ]]; then
+        fit "${G_UP}/${G_DOWN} move  Space toggle  a all  n none  i invert  Enter confirm  q/Esc back" "$(( BOXW - 1 ))"
+    else
+        fit "${G_UP}/${G_DOWN} move  Enter select  q/Esc back" "$(( BOXW - 1 ))"
+    fi
+    buf+="${C_DIM}${FIT}${C_RST}${T_EL}"$'\n'
+    buf+=$T_ED
+    printf '%s' "$buf"
+}
+
+# ---------------------------------------------------------------- prompts
+confirm() {   # confirm <question> <y|n default>   -> 0 = yes
+    local q=$1 def=${2:-n} ans hint='[y/N]'
+    [[ $def == y ]] && hint='[Y/n]'
+    printf '%s%s%s %s ' "$C_BOLD" "$q" "$C_RST" "$hint"
+    if [[ $UI_MODE == tui ]]; then
+        IFS= read -rsn1 ans || die_eof
+        printf '%s\n' "$ans"
+    else
+        IFS= read -r ans || die_eof
+    fi
+    [[ -z $ans ]] && ans=$def
+    [[ $ans == [yY]* ]]
+}
+
+ask_text() {   # ask_text <label> <default>  -> $ASK_RESULT
+    local label=$1 def=${2:-}
+    if [[ $UI_MODE == tui ]]; then
+        printf '%s' "$T_CNORM"
+        IFS= read -e -r -i "$def" -p "$label: " ASK_RESULT || die_eof
+    else
+        printf '%s [%s]: ' "$label" "$(disp "$def")"
+        IFS= read -r ASK_RESULT || die_eof
+        [[ -z $ASK_RESULT ]] && ASK_RESULT=$def
+    fi
+    return 0
+}
+
+# Hidden input.  Prompt goes to the terminal, never to a log.
+ask_secret() {   # ask_secret <prompt>  -> $SECRET_IN
+    printf '%s' "$1" >&2
+    IFS= read -rs SECRET_IN || { printf '\n' >&2; return 1; }
+    printf '\n' >&2
+    return 0
+}
+
+# shellcheck disable=SC2120  # the message argument is optional
+pause_key() {
+    printf '%s%s%s' "$C_DIM" "${1:-Press any key to continue...}" "$C_RST"
+    if [[ $UI_MODE == tui ]]; then IFS= read -rsn1 _ || true; else IFS= read -r _ || true; fi
+    printf '\n'
+}
+
 # The tool's own scratch/staging/trash folders (mktemp ./.linux-archive.XXXXXX).
 # One rule shared by the pickers and the direct argv route: such a name is never
 # a selectable item or archive.

@@ -1374,3 +1374,41 @@ z_pick_output() {
         esac
     done
 }
+
+# Build Z_CMD (argv, no shell) for the chosen format.  $Z_ARC is the temporary
+# output path; the real name is only used after the archive passed its test.
+z_build_cmd() {
+    local prog
+    Z_CMD=() Z_STDOUT=""
+    case $Z_FMT in
+        zip)
+            # Info-ZIP zip (man zip): -y store symlinks as links, -nw no wildcard matching,
+            # -r recurse, -0..-9 level.  With a password 7-Zip is used instead because
+            # `zip -P` puts the password on argv and `zip -e` needs /dev/tty.
+            if [[ -n $Z_PW ]]; then
+                Z_CMD=("$SZ" a -tzip -mem=AES256 "-mx=$Z_LVL" "${SZ_LINK[@]}" -spd -bd -p "$Z_ARC" -- "${Z_ITEMS[@]}")
+            else
+                Z_CMD=(zip -q -y -nw -r "-$Z_LVL" "$Z_ARC" -- "${Z_ITEMS[@]}")
+            fi ;;
+        7z)
+            Z_CMD=("$SZ" a -t7z "-mx=$Z_LVL" "${SZ_LINK[@]}" -spd -bd)
+            [[ -n $Z_PW ]] && Z_CMD+=(-p -mhe=on)
+            Z_CMD+=("$Z_ARC" -- "${Z_ITEMS[@]}") ;;
+        tar)
+            Z_CMD=(tar -c -f "$Z_ARC" -- "${Z_ITEMS[@]}") ;;
+        tar.gz|tar.bz2|tar.xz|tar.zst)
+            prog=$(fmt_tarprog "$Z_FMT" "$Z_LVL")
+            Z_CMD=(tar -c -f "$Z_ARC" -I "$prog" -- "${Z_ITEMS[@]}") ;;
+        squashfs)
+            # man mksquashfs: -keep-as-directory (single dir source keeps its own name),
+            # -noappend, -no-xattrs, -comp gzip + -Xcompression-level 1..9.
+            # -quiet only exists since squashfs-tools 4.4 (EL8 ships 4.3).
+            Z_CMD=(mksquashfs "${Z_ITEMS[@]}" "$Z_ARC" -noappend -keep-as-directory -no-progress -no-xattrs
+                   -comp gzip -Xcompression-level "$Z_LVL")
+            prog=$(mksquashfs -help 2>&1 </dev/null) || true
+            if [[ $prog == *-quiet* ]]; then Z_CMD+=(-quiet); fi ;;
+        gz)  Z_CMD=(gzip -c "-$Z_LVL" -- "${Z_ITEMS[0]}"); Z_STDOUT=$Z_ARC ;;
+        xz)  Z_CMD=(xz -T0 -c "-$Z_LVL" --memlimit-compress=50% -- "${Z_ITEMS[0]}"); Z_STDOUT=$Z_ARC ;;
+        zst) Z_CMD=(zstd -q -T0 -c "-$Z_LVL" -- "${Z_ITEMS[0]}"); Z_STDOUT=$Z_ARC ;;
+    esac
+}

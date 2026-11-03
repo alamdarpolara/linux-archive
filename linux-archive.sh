@@ -1412,3 +1412,51 @@ z_build_cmd() {
         zst) Z_CMD=(zstd -q -T0 -c "-$Z_LVL" -- "${Z_ITEMS[0]}"); Z_STDOUT=$Z_ARC ;;
     esac
 }
+
+# Integrity test of the freshly created archive.  Returns 0 on success.
+z_test_archive() {
+    local -a cmd=()
+    JOB_STDOUT_FILE=""
+    case $Z_FMT in
+        zip|7z)
+            if [[ $Z_FMT == zip && -z $Z_PW ]] && have unzip; then cmd=(unzip -tq "$Z_ARC")
+            else cmd=("$SZ" t -bd "$Z_ARC"); fi ;;
+        tar) cmd=(tar -t -f "$Z_ARC"); JOB_STDOUT_FILE=/dev/null ;;
+        tar.gz)  cmd=(tar -t -f "$Z_ARC" -I gzip);  JOB_STDOUT_FILE=/dev/null ;;
+        tar.bz2) cmd=(tar -t -f "$Z_ARC" -I bzip2); JOB_STDOUT_FILE=/dev/null ;;
+        tar.xz)  cmd=(tar -t -f "$Z_ARC" -I xz);    JOB_STDOUT_FILE=/dev/null ;;
+        tar.zst) cmd=(tar -t -f "$Z_ARC" -I zstd);  JOB_STDOUT_FILE=/dev/null ;;
+        squashfs) cmd=(unsquashfs -n -ll "$Z_ARC"); JOB_STDOUT_FILE=/dev/null ;;
+        gz)  cmd=(gzip -t "$Z_ARC") ;;
+        xz)  cmd=(xz -t "$Z_ARC") ;;
+        zst) cmd=(zstd -q -t "$Z_ARC") ;;
+    esac
+    JOB_SECRET=$Z_PW
+    run_job "Testing archive integrity" "${cmd[@]}"
+    (( JOB_RC == 0 ))
+}
+
+# Final step, under the directory lock: re-check the target (another run or
+# another user may have created it meanwhile) and rename atomically.  `mv -T`
+# (rename(2) with --no-target-directory) replaces a symlink itself and never
+# writes through it or into a directory it points to.
+z_commit() {
+    local why=""
+    if ! dir_lock; then z_fail "Could not lock the folder (another linux-archive run is busy here)."; return 1; fi
+    if [[ -L ./$Z_NAME ]]; then why="'$(disp "$Z_NAME")' is now a symbolic link - refused."
+    elif [[ -d ./$Z_NAME ]]; then why="'$(disp "$Z_NAME")' is now a folder - refused."
+    elif path_exists "./$Z_NAME" && (( ! Z_OVERWRITE )); then why="'$(disp "$Z_NAME")' was created meanwhile - not overwritten."
+    elif ! mv -T -f -- "$Z_ARC" "./$Z_NAME"; then why="Could not move the archive into place."
+    fi
+    dir_unlock
+    if [[ -n $why ]]; then z_fail "$why"; return 1; fi
+    return 0
+}
+
+z_fail() {   # z_fail <message>: remove the partial output and report
+    msg_err "$1"
+    job_log_show 8
+    [[ -n $Z_TMP ]] && rm -rf -- "$Z_TMP"
+    Z_TMP="" PARTIAL_PATH="" CUR_OP=""
+    msg_info "The partial archive was deleted; nothing was written to this folder."
+}

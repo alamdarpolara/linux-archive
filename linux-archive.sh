@@ -260,3 +260,68 @@ os_family() {
         *) echo unknown ;;
     esac
 }
+
+# The GNU userland is required: the safety scan relies on GNU tar's listing
+# format, `realpath -m`, `find -printf` and `mv -T`.  BusyBox/uutils
+# replacements are detected and reported instead of silently misbehaving.
+# NOTE: no `cmd | grep -q` here - with pipefail, grep -q may exit before
+# the writer is done, the writer dies of SIGPIPE and the pipeline "fails"
+# (observed intermittently with `mv --help` on Arch).  Output is captured.
+GNU_MISSING=()
+check_gnu() {
+    local out
+    GNU_MISSING=()
+    out=$(tar --version 2>/dev/null) || out=""
+    [[ $out == *"GNU tar"* ]] || GNU_MISSING+=("GNU tar")
+    find / -maxdepth 0 -printf '' >/dev/null 2>&1 || GNU_MISSING+=("GNU find (findutils)")
+    realpath -m -- /nonexistent/a/../b >/dev/null 2>&1 || GNU_MISSING+=("realpath -m (GNU coreutils)")
+    out=$(mv --help 2>&1) || out=""
+    [[ $out == *--no-target-directory* ]] || GNU_MISSING+=("mv -T (GNU coreutils)")
+    stat -c %s -- / >/dev/null 2>&1 || GNU_MISSING+=("stat -c (coreutils)")
+    have setsid || GNU_MISSING+=("setsid (util-linux)")
+    # BusyBox flock has no -w (timeout); util-linux flock prints its name.
+    [[ $(flock --version 2>&1 </dev/null) == *util-linux* ]] || GNU_MISSING+=("flock (util-linux)")
+    (( ${#GNU_MISSING[@]} == 0 ))
+}
+
+OS_FAMILY=""
+pkg_for() {   # tool -> package name on this distro family (for hints only)
+    [[ -n $OS_FAMILY ]] || OS_FAMILY=$(os_family)
+    local f=$OS_FAMILY
+    case $1 in
+        7z|7zz|7za) if [[ $f == fedora ]]; then echo "7zip (Fedora) / p7zip (EPEL)"; else echo 7zip; fi ;;
+        xz) if [[ $f == debian ]]; then echo xz-utils; else echo xz; fi ;;
+        mksquashfs|unsquashfs) if [[ $f == suse ]]; then echo squashfs; else echo squashfs-tools; fi ;;
+        rpm2cpio) case $f in debian|alpine) echo rpm2cpio ;; arch) echo rpm-tools ;; *) echo rpm ;; esac ;;
+        ar) echo binutils ;;
+        dpkg-deb) echo dpkg ;;
+        bsdtar) case $f in debian|alpine) echo libarchive-tools ;; arch) echo libarchive ;; *) echo bsdtar ;; esac ;;
+        tput) case $f in debian) echo ncurses-bin ;; suse) echo ncurses-utils ;; *) echo ncurses ;; esac ;;
+        setsid|flock) echo util-linux ;;
+        unrar) echo "unrar (non-free), or bsdtar for unencrypted RAR" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# need_tools tool...  -> 0 if all present, otherwise prints what is missing.
+need_tools() {
+    local t miss=()
+    for t in "$@"; do
+        case $t in
+            7z) [[ -n $SZ ]] || miss+=("7z (package $(pkg_for 7z))") ;;
+            unrar) pick_rar_backend; [[ -n $RAR_BACKEND ]] || miss+=("a RAR extractor (package $(pkg_for unrar))") ;;
+            *) have "$t" || miss+=("$t (package $(pkg_for "$t"))") ;;
+        esac
+    done
+    if (( ${#miss[@]} )); then
+        msg_err "Missing tool(s): ${miss[*]}"
+        msg_info "Install them with:  sudo ./install.sh"
+        return 1
+    fi
+    return 0
+}
+
+msg_ok()   { printf '%s%s%s %s\n' "$C_OK" "$G_OK" "$C_RST" "$*"; }
+msg_err()  { printf '%s%s %s%s\n' "$C_ERR" "$G_ERR" "$*" "$C_RST"; }
+msg_warn() { printf '%s%s %s%s\n' "$C_WARN" "$G_WARN" "$*" "$C_RST"; }
+msg_info() { printf '%s%s%s %s\n' "$C_ACC" "$G_INFO" "$C_RST" "$*"; }

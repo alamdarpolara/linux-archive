@@ -563,10 +563,144 @@ on_signal() {   # on_signal <name> <exit-code>
     exit "$2"
 }
 
+# ======================================================================= UI
+SPACES=$(printf '%200s' '')
+C_RST="" C_BOLD="" C_DIM="" C_REV="" C_ACC="" C_OK="" C_WARN="" C_ERR="" C_HEAD=""
+T_HOME="" T_ED="" T_EL="" T_CIVIS="" T_CNORM="" T_SGR0=""
+BOXW=80
+BANNER_BUF=""
+KEY=""
+FIT=""
+SCREEN_LINES=()     # content shown above every redraw of the next menus (menus repaint the screen)
+PENDING_MSG=()      # messages to show right after the next screen_begin
+MENU_INDEX=0
+MENU_CHECKED=()
+ASK_RESULT=""
+SECRET_IN=""
+G_TL='+' G_TR='+' G_BL='+' G_BR='+' G_H='-' G_V='|' G_PTR='>' G_OK='[ok]' G_ERR='[x]' G_WARN='[!]' G_INFO='[i]'
+G_UP='Up' G_DOWN='Down'
+
+ui_init() {
+    UI_MODE=plain
+    if (( ! FORCE_PLAIN )) && [[ -t 0 && -t 1 && -n ${TERM:-} && ${TERM:-} != dumb ]] && have tput; then
+        T_HOME=$(tput home 2>/dev/null) T_ED=$(tput ed 2>/dev/null) T_EL=$(tput el 2>/dev/null)
+        T_CIVIS=$(tput civis 2>/dev/null) T_CNORM=$(tput cnorm 2>/dev/null)
+        if [[ -n $T_HOME && -n $T_ED && -n $T_EL && -n $T_CIVIS && -n $T_CNORM ]]; then
+            UI_MODE=tui
+        fi
+    fi
+    T_SGR0=$(tput sgr0 2>/dev/null || true)
+    if [[ -t 0 ]]; then SAVED_STTY=$(stty -g 2>/dev/null || true); fi
+    if (( ! FORCE_NOCOLOR )) && [[ -z ${NO_COLOR:-} && -t 1 ]] && have tput; then
+        local n
+        n=$(tput colors 2>/dev/null || echo 0)
+        if [[ $n =~ ^[0-9]+$ ]] && (( n >= 8 )); then
+            C_RST=$T_SGR0 C_BOLD=$(tput bold 2>/dev/null) C_DIM=$(tput dim 2>/dev/null)
+            C_REV=$(tput rev 2>/dev/null)
+            C_ACC=$(tput setaf 6) C_OK=$(tput setaf 2) C_WARN=$(tput setaf 3)
+            C_ERR=$(tput setaf 1) C_HEAD=$(tput setaf 5)
+        fi
+    fi
+    if (( UI_UTF8 )); then
+        G_TL='╭' G_TR='╮' G_BL='╰' G_BR='╯' G_H='─' G_V='│' G_PTR='❯'
+        G_OK='✔' G_ERR='✖' G_WARN='⚠' G_INFO='ℹ' G_UP='↑' G_DOWN='↓'
+    fi
+    ui_layout
+}
+
+ui_layout() {
+    # `stty size` asks the terminal on stdin (TIOCGWINSZ); `tput cols` inside
+    # $(...) cannot reliably see the terminal (its stdout is a pipe), so it is
+    # only the fallback.
+    local sz
+    sz=$(stty size 2>/dev/null) || sz=""
+    if [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]] && (( BASH_REMATCH[2] > 0 )); then
+        ROWS=${BASH_REMATCH[1]} COLS=${BASH_REMATCH[2]}
+    else
+        COLS=$(tput cols 2>/dev/null || echo 80)
+        ROWS=$(tput lines 2>/dev/null || echo 24)
+    fi
+    [[ $COLS =~ ^[0-9]+$ ]] || COLS=80
+    [[ $ROWS =~ ^[0-9]+$ ]] || ROWS=24
+    (( COLS < 44 )) && COLS=44
+    (( ROWS < 14 )) && ROWS=14
+    BOXW=$(( COLS - 1 ))
+    (( BOXW > 100 )) && BOXW=100
+    build_banner
+}
+
+# fit <text> <width>  ->  $FIT, exactly <width> characters (cut / padded).
+fit() {
+    local s=$1 w=$2 e='~' pad
+    (( UI_UTF8 )) && e='…'
+    if (( ${#s} > w )); then
+        if (( w >= 2 )); then s="${s:0:w-1}$e"; else s=${s:0:w}; fi
+    fi
+    pad=$(( w - ${#s} ))
+    (( pad > 0 )) && s+=${SPACES:0:pad}
+    FIT=$s
+}
+
+build_banner() {
+    local inner=$(( BOXW - 2 )) line1 line2 hl
+    hl=$(repeat "$G_H" "$inner")
+    fit " LINUX-ARCHIVE  -  terminal archive helper   v$LA_VERSION" "$inner"; line1=$FIT
+    fit " folder: $(disp "$PWD")" "$inner"; line2=$FIT
+    BANNER_BUF="${C_ACC}${G_TL}${hl}${G_TR}${C_RST}"$'\n'
+    BANNER_BUF+="${C_ACC}${G_V}${C_RST}${C_BOLD}${C_HEAD}${line1}${C_RST}${C_ACC}${G_V}${C_RST}"$'\n'
+    BANNER_BUF+="${C_ACC}${G_V}${C_RST}${C_DIM}${line2}${C_RST}${C_ACC}${G_V}${C_RST}"$'\n'
+    BANNER_BUF+="${C_ACC}${G_BL}${hl}${G_BR}${C_RST}"$'\n'
+}
+
+# shellcheck disable=SC2329  # installed with `trap on_winch WINCH`
+on_winch() { RESIZED=1; }
+
 msg_ok()   { printf '%s%s%s %s\n' "$C_OK" "$G_OK" "$C_RST" "$*"; }
 msg_err()  { printf '%s%s %s%s\n' "$C_ERR" "$G_ERR" "$*" "$C_RST"; }
 msg_warn() { printf '%s%s %s%s\n' "$C_WARN" "$G_WARN" "$*" "$C_RST"; }
 msg_info() { printf '%s%s%s %s\n' "$C_ACC" "$G_INFO" "$C_RST" "$*"; }
+
+# Menus repaint the whole screen, so text that must stay visible next to a menu
+# is collected in SCREEN_LINES (ui_note_*) and drawn by the menu itself.
+ui_note()      { SCREEN_LINES+=("$1"); }
+ui_note_info() { SCREEN_LINES+=("$(msg_info "$*")"); }
+ui_note_warn() { SCREEN_LINES+=("$(msg_warn "$*")"); }
+ui_note_err()  { SCREEN_LINES+=("$(msg_err "$*")"); }
+ui_note_box()  { local l; while IFS= read -r l; do SCREEN_LINES+=("$l"); done < <(box_print "$@"); }
+screen_flush() { local l; for l in "${SCREEN_LINES[@]}"; do printf '%s\n' "$l"; done; SCREEN_LINES=(); }
+defer_warn()   { PENDING_MSG+=("$1"); }
+
+screen_begin() {   # screen_begin <title>
+    SCREEN_LINES=()
+    if [[ $UI_MODE == tui ]]; then
+        printf '%s%s%s' "$T_HOME" "$T_ED" "$T_CNORM"
+        printf '%s' "$BANNER_BUF"
+    else
+        printf '\n%s== linux-archive %s  [%s] ==%s\n' "$C_ACC" "$LA_VERSION" "$(disp "$PWD")" "$C_RST"
+    fi
+    printf '\n%s%s%s\n\n' "$C_BOLD" "$1" "$C_RST"
+    local m
+    for m in "${PENDING_MSG[@]}"; do msg_warn "$m"; done
+    PENDING_MSG=()
+}
+
+# Draw a titled box around the given lines.
+box_print() {   # box_print <title> <line>...
+    local title=$1 inner=$(( BOXW - 2 )) l hl
+    shift
+    fit " $title " "$(( ${#title} + 2 > inner - 2 ? inner - 2 : ${#title} + 2 ))"
+    hl=$(repeat "$G_H" $(( inner - ${#FIT} - 1 )))
+    printf '%s%s%s%s%s%s%s%s\n' "$C_ACC" "$G_TL" "$G_H" "$C_RST" "$C_BOLD$FIT$C_RST" "$C_ACC" "$hl" "$G_TR$C_RST"
+    for l in "$@"; do
+        fit " $(disp "$l")" "$inner"
+        printf '%s%s%s%s%s%s%s\n' "$C_ACC" "$G_V" "$C_RST" "$FIT" "$C_ACC" "$G_V" "$C_RST"
+    done
+    hl=$(repeat "$G_H" "$inner")
+    printf '%s%s%s%s%s\n' "$C_ACC" "$G_BL" "$hl" "$G_BR" "$C_RST"
+}
+
+# ------------------------------------------------------------------ input
+# read_key -> $KEY in: UP DOWN LEFT RIGHT ENTER SPACE ESC BACK HOME END PGUP
 # The tool's own scratch/staging/trash folders (mktemp ./.linux-archive.XXXXXX).
 # One rule shared by the pickers and the direct argv route: such a name is never
 # a selectable item or archive.

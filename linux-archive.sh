@@ -1065,7 +1065,51 @@ job_log_show() {
     done < <(grep -vE '^[[:space:]]*$|^7-Zip|^Scanning|^Enter password' "$JOB_LOG" 2>/dev/null | tail -n "$n")
 }
 
+# ==================================================================== ZIP
+CWD_NAMES=()
+# shellcheck disable=SC2034  # filled by list_cwd, handed to the menus by name
+CWD_LABELS=() CWD_DETAILS=()
+Z_ITEMS=()            # chosen entries, each as "./name" (safe for any name)
+Z_SELMODE=single
+Z_FMT="" Z_LVL="" Z_LVLNAME="" Z_PW="" Z_NAME="" Z_EXT="" Z_ARC="" Z_TMP="" Z_OVERWRITE=0
+Z_CMD=() Z_STDOUT=""
+CLI_OP="" CLI_FMT="" CLI_ITEMS=() CLI_DIRECT=0
+INVOKED_AS=linux-archive
+LV_LABELS=() LV_VALUES=() LV_DEF=0
+FMT_IDS=() FMT_LABELS=() FMT_DETAILS=()
+
 # The tool's own scratch/staging/trash folders (mktemp ./.linux-archive.XXXXXX).
 # One rule shared by the pickers and the direct argv route: such a name is never
 # a selectable item or archive.
 is_scratch_name() { [[ ${1##*/} == .linux-archive.* ]]; }
+
+# Fill CWD_* with the entries of the current directory: folders first, hidden
+# entries included.  Names are only ever handled as array elements.
+# shellcheck disable=SC2034  # CWD_LABELS/CWD_DETAILS are handed to the menus by name
+list_cwd() {
+    local n i t s off chunk=1000
+    local -a all=() dirs=() files=() stats=() part=()
+    shopt -s dotglob nullglob
+    all=( * )
+    shopt -u dotglob nullglob
+    for n in "${all[@]}"; do
+        is_scratch_name "$n" && continue
+        if [[ -d $n && ! -L $n ]]; then dirs+=("$n"); else files+=("$n"); fi
+    done
+    CWD_NAMES=("${dirs[@]}" "${files[@]}")
+    CWD_LABELS=() CWD_DETAILS=()
+    for (( off = 0; off < ${#CWD_NAMES[@]}; off += chunk )); do
+        mapfile -t part < <(stat -c '%A %s' -- "${CWD_NAMES[@]:off:chunk}" 2>/dev/null)
+        stats+=("${part[@]}")
+    done
+    for (( i = 0; i < ${#CWD_NAMES[@]}; i++ )); do
+        n=${CWD_NAMES[i]}
+        t=${stats[i]:-}
+        s=${t#* }
+        case ${t:0:1} in
+            d) CWD_LABELS[i]="$n/"; CWD_DETAILS[i]="<DIR>" ;;
+            l) CWD_LABELS[i]="$n@"; CWD_DETAILS[i]="<LINK>" ;;
+            *) CWD_LABELS[i]=$n; CWD_DETAILS[i]=$(human "${s:-0}") ;;
+        esac
+    done
+}

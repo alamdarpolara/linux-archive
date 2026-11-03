@@ -321,6 +321,95 @@ need_tools() {
     return 0
 }
 
+print_check() {
+    local t row ok=0 bad=0 g
+    printf 'linux-archive %s - dependency check\n\n' "$LA_VERSION"
+    for t in tar gzip bzip2 xz zstd lz4 zip unzip mksquashfs unsquashfs cabextract rpm2cpio cpio ar dpkg-deb bsdtar file setsid flock tput; do
+        if have "$t"; then printf '  [ok]      %-12s %s\n' "$t" "$(command -v "$t")"; ok=$((ok+1))
+        else printf '  [MISSING] %-12s package: %s\n' "$t" "$(pkg_for "$t")"; bad=$((bad+1)); fi
+    done
+    if [[ -n $SZ ]]; then
+        row=$SZ
+        (( SZ_RAR )) && row+=" (includes the RAR decoder)"
+        printf '  [ok]      %-12s %s\n' "7-Zip" "$row"; ok=$((ok+1))
+    else printf '  [MISSING] %-12s package: %s\n' "7-Zip" "$(pkg_for 7z)"; bad=$((bad+1)); fi
+    pick_rar_backend
+    case $RAR_BACKEND in
+        unrar) row="$UNRAR (real RAR tool: RAR4/RAR5, encrypted RAR supported)" ;;
+        7z) row="$SZ (7-Zip RAR decoder: RAR4/RAR5, encrypted RAR supported)" ;;
+        unar) row="$UNAR (unar: unencrypted RAR only - it takes passwords only on argv)" ;;
+        unrar-free) row="$UNRAR_FREE (unrar-free: no encrypted RAR, limited RAR5)" ;;
+        bsdtar) row="$(command -v bsdtar) (libarchive: unencrypted RAR only)" ;;
+        *) row="" ;;
+    esac
+    if [[ -n $row ]]; then printf '  [ok]      %-12s %s\n' "RAR" "$row"; ok=$((ok+1))
+    else printf '  [MISSING] %-12s package: %s\n' "RAR" "$(pkg_for unrar)"; bad=$((bad+1)); fi
+    if check_gnu; then
+        printf '  [ok]      %-12s %s\n' "GNU tools" "GNU tar, findutils, coreutils, util-linux"; ok=$((ok+1))
+    else
+        for g in "${GNU_MISSING[@]}"; do printf '  [MISSING] %-12s %s\n' "GNU tools" "$g"; done; bad=$((bad+1))
+    fi
+    printf '\n%d present, %d missing.' "$ok" "$bad"
+    (( bad )) && printf '  Run: sudo ./install.sh'
+    printf '\n'
+    return $(( bad > 0 ))
+}
+
+# --verify: compare the installed files with the manifest written by setup.sh.
+readonly MANIFEST=/var/lib/linux-archive/manifest
+print_verify() {
+    local kind path a b c bad=0 n=0 sum seen_dir=0 seen_file=0 seen_larc=0
+    if [[ ! -r $MANIFEST ]]; then
+        printf 'linux-archive: no manifest at %s - not installed with setup.sh.\n' "$MANIFEST" >&2
+        return 2
+    fi
+    while IFS=$'\t' read -r kind path a b c; do
+        case $kind in
+            file)
+                n=$((n+1)); [[ $path == /opt/linux-archive/linux-archive.sh ]] && seen_file=1
+                sum=$(sha256sum -- "$path" 2>/dev/null | cut -d' ' -f1)
+                if [[ ! $a =~ ^[0-9a-f]{64}$ ]]; then
+                    printf '  [CHANGED]  %s (the manifest has no valid SHA-256)\n' "$path"; bad=1
+                elif [[ -f $path && ! -L $path && $sum == "$a" && $(stat -c '%U:%G %a' -- "$path" 2>/dev/null) == "$b $c" ]]; then
+                    printf '  [ok]       %s\n' "$path"
+                else
+                    printf '  [CHANGED]  %s\n' "$path"; bad=1
+                fi ;;
+            dir)
+                n=$((n+1)); [[ $path == /opt/linux-archive ]] && seen_dir=1
+                if [[ -d $path && ! -L $path && $(stat -c '%U:%G %a' -- "$path" 2>/dev/null) == "$a $b" ]]; then
+                    printf '  [ok]       %s/\n' "$path"
+                else
+                    printf '  [CHANGED]  %s/\n' "$path"; bad=1
+                fi ;;
+            symlink)
+                n=$((n+1))
+                if [[ -L $path && $(readlink -- "$path") == "$a" ]]; then printf '  [ok]       %s -> %s\n' "$path" "$a"
+                else printf '  [CHANGED]  %s\n' "$path"; bad=1; fi ;;
+            larc)
+                seen_larc=1
+                if [[ $path != /usr/local/bin/larc || $a != /opt/linux-archive/linux-archive.sh ]]; then
+                    printf '  [CHANGED]  invalid larc manifest record\n'; bad=1
+                elif [[ $b == owned ]]; then
+                    n=$((n+1))
+                    if [[ -L $path && $(readlink -- "$path") == "$a" && $(command -v larc 2>/dev/null || true) == "$path" ]]; then
+                        printf '  [ok]       %s -> %s (owned)\n' "$path" "$a"
+                    else printf '  [CHANGED]  %s (owned alias missing, retargeted or shadowed)\n' "$path"; bad=1; fi
+                elif [[ $b == collision ]]; then
+                    printf '  [skipped]  larc (foreign command; not owned or checked)\n'
+                else printf '  [CHANGED]  invalid larc manifest state\n'; bad=1; fi ;;
+        esac
+    done <"$MANIFEST"
+    if (( n == 0 )); then printf 'linux-archive: the manifest is empty or unreadable.\n' >&2; return 2; fi
+    # Fail closed: a manifest that omits a required record must not verify.
+    (( seen_dir )) || { printf '  [CHANGED]  the manifest has no record for /opt/linux-archive\n'; bad=1; }
+    (( seen_file )) || { printf '  [CHANGED]  the manifest has no record for /opt/linux-archive/linux-archive.sh\n'; bad=1; }
+    (( seen_larc )) || { printf '  [CHANGED]  the manifest has no larc record (written by the current setup.sh)\n'; bad=1; }
+    if (( bad )); then printf '\nVERIFY FAILED: the installation was modified (re-run: sudo ./setup.sh).\n'; return 1; fi
+    printf '\nInstallation verified: files match the manifest.\n'
+    return 0
+}
+
 msg_ok()   { printf '%s%s%s %s\n' "$C_OK" "$G_OK" "$C_RST" "$*"; }
 msg_err()  { printf '%s%s %s%s\n' "$C_ERR" "$G_ERR" "$*" "$C_RST"; }
 msg_warn() { printf '%s%s %s%s\n' "$C_WARN" "$G_WARN" "$*" "$C_RST"; }

@@ -1206,3 +1206,52 @@ z_pick_items() {
 z_single_regular_file() {   # exactly one selected item and it is a regular file
     (( ${#Z_ITEMS[@]} == 1 )) && [[ -f ${Z_ITEMS[0]} && ! -L ${Z_ITEMS[0]} ]]
 }
+
+z_pick_format() {
+    local ids=(zip 7z tar tar.gz tar.bz2 tar.xz tar.zst squashfs)
+    local lbl=("ZIP" "7z" "TAR" "TAR + gzip" "TAR + bzip2" "TAR + xz" "TAR + zstd" "SquashFS")
+    local det=("universal, optional AES-256 password" "best ratio, password + hidden file names" "no compression"
+               "fast, very common (.tar.gz)" "good ratio (.tar.bz2)" "very good ratio, slow (.tar.xz)"
+               "fast + strong (.tar.zst)" "read-only compressed filesystem image")
+    local i miss t
+    FMT_IDS=() FMT_LABELS=() FMT_DETAILS=()
+    for i in "${!ids[@]}"; do
+        FMT_IDS+=("${ids[i]}") FMT_LABELS+=("${lbl[i]}") FMT_DETAILS+=("${det[i]}")
+    done
+    if z_single_regular_file; then
+        FMT_IDS+=(gz xz zst)
+        FMT_LABELS+=("gzip  (single file)" "xz    (single file)" "zstd  (single file)")
+        FMT_DETAILS+=(".gz - one file only" ".xz - one file only" ".zst - one file only")
+    fi
+    # Mark formats whose tools are missing.
+    for i in "${!FMT_IDS[@]}"; do
+        miss=""
+        for t in $(fmt_tools "${FMT_IDS[i]}"); do
+            case $t in
+                7z) [[ -n $SZ ]] || miss=" [7z missing]" ;;
+                *) have "$t" || miss=" [$t missing]" ;;
+            esac
+        done
+        FMT_LABELS[i]+=$miss
+    done
+    while :; do
+        screen_begin "ZIP  -  step 2: archive format"
+        ui_note_info "Selected: $(z_items_summary)"
+        menu_single "Archive format" "Which format do you want to create?" FMT_LABELS FMT_DETAILS 0 || return 1
+        Z_FMT=${FMT_IDS[MENU_INDEX]}
+        # shellcheck disable=SC2046  # fmt_tools prints a fixed word list
+        if need_tools $(fmt_tools "$Z_FMT"); then
+            Z_EXT=$(fmt_ext "$Z_FMT")
+            return 0
+        fi
+        pause_key
+    done
+}
+
+z_items_summary() {
+    if (( ${#Z_ITEMS[@]} == 1 )); then
+        printf '%s' "$(disp "${Z_ITEMS[0]#./}")"
+    else
+        printf '%d items (%s ...)' "${#Z_ITEMS[@]}" "$(disp "${Z_ITEMS[0]#./}")"
+    fi
+}

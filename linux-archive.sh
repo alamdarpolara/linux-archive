@@ -1521,3 +1521,47 @@ z_run() {
     echo
     return 0
 }
+
+zip_flow() {
+    local step=mode rc
+    [[ -w . ]] || { screen_begin "ZIP"; msg_err "The current folder is not writable."; (( CLI_DIRECT )) || pause_key; return 1; }
+    if (( ${#CLI_ITEMS[@]} )); then
+        Z_ITEMS=("${CLI_ITEMS[@]}")
+        step=format
+    elif [[ $CLI_FMT == gz || $CLI_FMT == xz || $CLI_FMT == zst ]]; then
+        Z_SELMODE=single             # the format itself already fixes the count
+        step=items
+    fi
+    while :; do
+        case $step in
+            mode)   z_pick_mode   || return 0; step=items ;;
+            items)  if z_pick_items; then step=format
+                    elif [[ $CLI_FMT == gz || $CLI_FMT == xz || $CLI_FMT == zst ]]; then return 0
+                    else step=mode; fi ;;
+            format)
+                if [[ -n $CLI_FMT ]]; then
+                    Z_FMT=$CLI_FMT
+                    Z_EXT=$(fmt_ext "$Z_FMT")
+                    if [[ $Z_FMT == gz || $Z_FMT == xz || $Z_FMT == zst ]] && ! z_single_regular_file; then
+                        msg_err "The $Z_FMT format requires exactly one regular file (not a symlink)."
+                        if (( ${#CLI_ITEMS[@]} )); then return 2; fi
+                        pause_key; step=items; continue
+                    fi
+                    # shellcheck disable=SC2046  # fixed format-to-tool table
+                    need_tools $(fmt_tools "$Z_FMT") || { (( CLI_DIRECT )) || pause_key; return 1; }
+                    step=level
+                elif z_pick_format; then step=level
+                else step=items; fi ;;
+            level)  if z_pick_level; then step=password; else forget_zpw; if [[ -n $CLI_FMT ]]; then return 0; else step=format; fi; fi ;;
+            password) if z_pick_password; then step=output; else step=level; fi ;;
+            output)
+                z_pick_output; rc=$?
+                case $rc in 0) step=run ;; 1) step=password ;; 2) forget_zpw; return 0 ;; esac ;;
+            run)
+                z_run; rc=$?
+                forget_zpw
+                (( CLI_DIRECT )) || pause_key
+                return "$rc" ;;
+        esac
+    done
+}

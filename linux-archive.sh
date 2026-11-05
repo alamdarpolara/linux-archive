@@ -1826,3 +1826,29 @@ scan_add() {
         PREVIEW+=("$(printf '%s %10s  %s' "$mark" "$(human "$sz")" "$p")")
     fi
 }
+
+# Parsers: read one listing format from $1 and call scan_add.
+parse_7z() {
+    local line path="" size=0 folder="" attr="" have=0 t
+    flush7() {
+        (( have )) || return 0
+        t=f
+        [[ $folder == + ]] && t=d
+        [[ $t == f && $attr =~ (^|[[:space:]])l[-rwxsStT]{9} ]] && t=l
+        scan_add "$t" "$size" "$path"
+        path="" size=0 folder="" attr="" have=0
+    }
+    while IFS= read -r line; do
+        # p7zip 16.02 (EPEL) writes its password prompt to stdout WITHOUT a
+        # newline, so the first record follows it on the same line:
+        # "Enter password (will not be echoed):Path = name" (verified on EL8).
+        if [[ $line == 'Enter password'* && $line == *'Path = '* ]]; then line="Path = ${line#*Path = }"; fi
+        case $line in
+            'Path = '*)       flush7; path=${line#Path = }; have=1 ;;
+            'Size = '*)       size=${line#Size = } ;;
+            'Folder = '*)     folder=${line#Folder = } ;;
+            'Attributes = '*) attr=${line#Attributes = } ;;
+        esac
+    done <"$1"
+    flush7
+}

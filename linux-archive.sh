@@ -1907,3 +1907,64 @@ parse_lsl() {   # bsdtar -tv / cpio -tv   (mode nlink owner group size mon day t
         fi
     done <"$1"
 }
+
+parse_ar() {   # ar tv:  rw-r--r-- 0/0 6 Jan  1 00:00 1970 name
+    local line
+    local re='^[-r][-rwx]{8}[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)[[:space:]]+[A-Za-z]{3}[[:space:]]+[0-9]+[[:space:]]+[0-9:]+[[:space:]]+[0-9]{4}[[:space:]]+(.*)$'
+    while IFS= read -r line; do
+        [[ $line =~ $re ]] && scan_add f "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    done <"$1"
+}
+
+parse_cab() {   # cabextract -l:  "      6 | 01.11.2026 02:22:26 | src/a.txt"
+    local line sz name
+    local re='^[[:space:]]*([0-9]+)[[:space:]]*\|[^|]*\|[[:space:]]?(.*)$'
+    while IFS= read -r line; do
+        if [[ $line =~ $re ]]; then
+            sz=${BASH_REMATCH[1]} name=${BASH_REMATCH[2]}
+            scan_add f "$sz" "$name"
+        fi
+    done <"$1"
+}
+
+parse_unrar() {   # unrar lt blocks (Name: / Type: / Size:)
+    local line name="" type="" size=0 have=0 t
+    flushr() {
+        (( have )) || return 0
+        t=f
+        case $type in
+            *[Dd]irectory*) t=d ;;
+            *[Ss]ym*|*[Ll]ink*) t=l ;;
+        esac
+        scan_add "$t" "$size" "$name"
+        name="" type="" size=0 have=0
+    }
+    while IFS= read -r line; do
+        case $line in
+            *'        Name: '*) flushr; name=${line#*Name: }; have=1 ;;
+            *'        Type: '*) type=${line#*Type: } ;;
+            *'        Size: '*) size=${line#*Size: } ;;
+        esac
+    done <"$1"
+    flushr
+}
+
+# lsar -l (unar 1.10):  "  1. ---E-    18  -77.8%  Nr29  2024-03-22 10:59  b.txt"
+# flags = D(irectory) R(esource fork) L(ink) E(ncrypted) @(xattrs)
+parse_lsar() {
+    local line fl t
+    local re='^[[:space:]]*[0-9]+\.[[:space:]]+([-DRLE@]{5})[[:space:]]+([0-9]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[0-9-]+[[:space:]]+[0-9:]+[[:space:]]+(.*)$'
+    while IFS= read -r line; do
+        if [[ $line =~ $re ]]; then
+            fl=${BASH_REMATCH[1]} t=f
+            [[ ${fl:0:1} == D ]] && t=d
+            [[ ${fl:2:1} == L ]] && t=l
+            [[ ${fl:3:1} == E && $A_ENC == none ]] && A_ENC=data
+            scan_add "$t" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+        fi
+    done <"$1"
+}
+
+# u_list: run the listing command for A_TYPE and scan it.
+#   0 ok | 1 failed (message printed) | 3 password needed | 4 wrong password
+#   5 encrypted, but the only available tool cannot take a password safely

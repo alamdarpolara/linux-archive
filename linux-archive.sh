@@ -2072,3 +2072,85 @@ u_list() {
     fi
     return 0
 }
+
+# Wipe the archive password and leave secret mode.
+forget_apw() { wipe_var A_PW; A_PW=""; secret_off; }
+
+u_ask_password() {   # prompt for an archive password into A_PW; 1 = cancelled
+    secret_on
+    ask_secret "Password for $(disp "$A_FILE"): " || return 1
+    A_PW=$SECRET_IN
+    SECRET_IN=""
+    [[ -n $A_PW ]]
+}
+
+# Open the archive: list it, asking for a password when even the listing needs one.
+u_open() {
+    local rc tries=0
+    forget_apw
+    A_ENC=none
+    while :; do
+        u_list; rc=$?
+        case $rc in
+            0) return 0 ;;
+            3|4)
+                if (( rc == 4 )); then
+                    msg_warn "Wrong password."
+                    wipe_var A_PW; A_PW=""     # secret mode stays on until the flow ends
+                    tries=$(( tries + 1 ))
+                    if (( tries >= 3 )); then msg_err "Too many wrong passwords."; return 1; fi
+                else
+                    msg_info "This archive is password-protected (even the file list is encrypted)."
+                fi
+                u_ask_password || { msg_warn "No password given."; return 1; } ;;
+            5)
+                msg_err "This RAR archive is encrypted, but the RAR tool available here ($RAR_BACKEND)"
+                msg_err "accepts a password only on its command line (visible to every user in 'ps')"
+                msg_err "or terminal, so linux-archive will not use it for encrypted archives."
+                msg_info "Install the non-free unrar or a 7-Zip with the RAR decoder: sudo ./install.sh --with-nonfree"
+                return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+# Analyse the scan results into HARD (abort) and WARN (ask) lists.
+u_analyze() {
+    local free asz ratio b
+    free=$(free_bytes .)
+    asz=$(file_size "$A_FILE")
+    if (( ${#BAD_PATHS[@]} )); then
+        HARD+=("Unsafe member paths (absolute or containing '..'):")
+        for b in "${BAD_PATHS[@]}"; do HARD+=("   $(disp "$b")"); done
+    fi
+    (( LINK_THROUGH )) && HARD+=("An entry is stored below a symlink of the same archive (symlink attack).")
+    (( CAP_HIT )) && HARD+=("The decompressed data is larger than the free disk space ($(human "$free")).")
+    if (( SIZE_KNOWN )); then
+        if (( SUM_SIZE > LIMIT_MAX_BYTES )); then
+            HARD+=("The archive declares $(human "$SUM_SIZE") of data - above the safety limit of $(human "$LIMIT_MAX_BYTES").")
+        fi
+        if (( SUM_SIZE > free - free / 20 )); then
+            HARD+=("Not enough free disk space: $(human "$SUM_SIZE") needed, $(human "$free") free.")
+        elif (( SUM_SIZE > free * 4 / 5 )); then
+            WARN+=("The contents ($(human "$SUM_SIZE")) would fill more than 80% of the free space ($(human "$free")).")
+        fi
+        if (( asz > 0 )); then
+            ratio=$(( SUM_SIZE / asz ))
+            if (( ratio >= LIMIT_HARD_RATIO && SUM_SIZE >= LIMIT_HARD_RATIO_MIN )); then
+                HARD+=("Compression ratio ${ratio}:1 ($(human "$asz") -> $(human "$SUM_SIZE")): ZIP BOMB - refused.")
+            elif (( ratio >= LIMIT_WARN_RATIO && SUM_SIZE >= LIMIT_WARN_RATIO_MIN )); then
+                WARN+=("Very high compression ratio ${ratio}:1 ($(human "$asz") -> $(human "$SUM_SIZE")): possible ZIP BOMB.")
+            fi
+        fi
+    else
+        WARN+=("The unpacked size cannot be determined in advance; extraction stops if it would fill the disk.")
+    fi
+    if (( N_ENTRIES > LIMIT_MAX_ENTRIES )); then
+        HARD+=("The archive has $N_ENTRIES entries - above the safety limit of $LIMIT_MAX_ENTRIES (file-count bomb).")
+    elif (( N_ENTRIES > LIMIT_MAX_ENTRIES / 2 )); then
+        WARN+=("The archive has $N_ENTRIES entries.")
+    fi
+    if (( N_SPECIAL > 0 )); then
+        WARN+=("The archive contains $N_SPECIAL device/FIFO/socket entries; they will NOT be created.")
+    fi
+}

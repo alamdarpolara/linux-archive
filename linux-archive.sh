@@ -2154,3 +2154,68 @@ u_analyze() {
         WARN+=("The archive contains $N_SPECIAL device/FIFO/socket entries; they will NOT be created.")
     fi
 }
+
+# Build the review screen as SCREEN_LINES (the menu below repaints the screen).
+u_preview() {
+    local asz ratio="n/a" enc lines=() e n shown=12
+    asz=$(file_size "$A_FILE")
+    (( SIZE_KNOWN && asz > 0 )) && ratio="$(( SUM_SIZE / asz )):1"
+    case $A_ENC in
+        none) enc="no" ;;
+        data) enc="yes (file contents)" ;;
+        header) enc="yes (contents and file names)" ;;
+    esac
+    SCREEN_LINES=()
+    lines=("Archive:   $A_FILE   [$A_REAL$([[ -n $A_TARC ]] && printf ' / tar.%s' "$A_TARC"), $(human "$asz")]"
+           "Encrypted: $enc")
+    if (( A_NOLIST )); then
+        lines+=("Contents:  not listed in advance for this format")
+    else
+        lines+=("Entries:   $N_ENTRIES  ($N_FILES files, $N_DIRS folders, $N_LINKS links)"
+                "Unpacked:  $(human "$SUM_SIZE")   ratio $ratio   free space $(human "$(free_bytes .)")")
+    fi
+    ui_note_box "Archive summary" "${lines[@]}"
+    n=$(( ROWS - 22 - ${#HARD[@]} - ${#WARN[@]} - ${#A_NOTES[@]} ))     # keep the review on one screen
+    (( n < shown )) && shown=$n
+    if (( ${#PREVIEW[@]} && shown >= 2 )); then
+        ui_note_box "First entries" "${PREVIEW[@]:0:shown}"
+        (( N_ENTRIES > shown )) && ui_note "${C_DIM}   ... and $(( N_ENTRIES - shown )) more${C_RST}"
+    fi
+    for e in "${A_NOTES[@]}"; do
+        case $e in W:*) ui_note_warn "${e#W:}" ;; *) ui_note_info "${e#I:}" ;; esac
+    done
+    for e in "${HARD[@]}"; do ui_note_err "$e"; done
+    for e in "${WARN[@]}"; do ui_note_warn "$e"; done
+}
+
+# Where to extract, with Overwrite / Rename / Skip.  0 ok, 1 back, 2 skip.
+u_pick_dest() {
+    local name def
+    local -a l=("Overwrite" "Rename" "Skip (do not extract)") d=("replace the existing folder" "extract to another folder name" "back to the main menu")
+    U_REPLACE=0
+    def=$A_BASE
+    while :; do
+        screen_begin "UNZIP  -  destination folder"
+        ask_text "Extract into folder (inside $(disp "$PWD"))" "$def"
+        name=$ASK_RESULT
+        [[ -z $name ]] && return 1
+        if ! valid_name "$name"; then defer_warn "Invalid folder name (no '/', no control characters)."; continue; fi
+        if [[ ./$name == "$A_FILE" ]]; then defer_warn "That is the archive itself."; def=$(unique_name "$A_BASE" ""); continue; fi
+        if ! path_exists "./$name"; then U_DEST=$name; return 0; fi
+        if [[ -L ./$name ]]; then
+            defer_warn "'$(disp "$name")' is a symbolic link - refused, choose another name."
+            def=$(unique_name "$name" ""); continue
+        fi
+        screen_begin "UNZIP  -  '$(disp "$name")' already exists"
+        menu_single "Destination exists" "What do you want to do?" l d 1 || { def=$name; continue; }
+        case $MENU_INDEX in
+            0)
+                if confirm "Delete the existing '$(disp "$name")' and replace it with the extracted files?" n; then
+                    U_DEST=$name; U_REPLACE=1; return 0
+                fi
+                def=$name ;;
+            1) def=$(unique_name "$name" "") ;;
+            2) return 2 ;;
+        esac
+    done
+}

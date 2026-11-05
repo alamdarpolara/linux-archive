@@ -1703,3 +1703,77 @@ mime_to_type() {
         *) magic_type "$file" ;;
     esac
 }
+
+# Fill U_* with the supported archives of the current directory (by REAL type).
+u_scan() {
+    local n i off chunk=400 t hint
+    local -a all=() files=() mimes=() part=() sizes=()
+    U_NAMES=() U_TYPES=() U_LABELS=() U_DETAILS=() U_FAKE=()
+    if (( $# )); then
+        all=("$@")
+    else
+        shopt -s dotglob nullglob
+        all=( * )
+        shopt -u dotglob nullglob
+    fi
+    for n in "${all[@]}"; do
+        is_scratch_name "$n" && continue
+        [[ -f $n ]] && files+=("$n")
+    done
+    (( ${#files[@]} )) || return 0
+    for (( off = 0; off < ${#files[@]}; off += chunk )); do
+        mapfile -t part < <(file -b -L --mime-type -- "${files[@]:off:chunk}" 2>/dev/null)
+        mimes+=("${part[@]}")
+    done
+    if (( ${#mimes[@]} != ${#files[@]} )); then      # should not happen; be safe
+        mimes=()
+        for n in "${files[@]}"; do mimes+=("$(file -b -L --mime-type -- "$n" 2>/dev/null | head -n 1)"); done
+    fi
+    for (( off = 0; off < ${#files[@]}; off += chunk )); do
+        mapfile -t part < <(stat -L -c %s -- "${files[@]:off:chunk}" 2>/dev/null)
+        sizes+=("${part[@]}")
+    done
+    for (( i = 0; i < ${#files[@]}; i++ )); do
+        n=${files[i]}
+        t=$(mime_to_type "${mimes[i]}" "$n")
+        hint=$(ext_hint "$n")
+        if [[ -z $t ]]; then
+            [[ -n $hint ]] && U_FAKE+=("$n")
+            continue
+        fi
+        U_NAMES+=("$n") U_TYPES+=("$t") U_LABELS+=("$n")
+        U_DETAILS+=("$(printf '%-9s %s' "$t" "$(human "${sizes[i]:-0}")")")
+    done
+}
+
+u_dec_cmd() {   # sets DEC (decompress-to-stdout argv) for a compression code
+    case $1 in
+        gz) DEC=(gzip -dc) ;; bz2) DEC=(bzip2 -dc) ;; xz) DEC=(xz -dc) ;; zst) DEC=(zstd -dc -q) ;;
+        lz4) DEC=(lz4 -dc -q) ;; lzma) DEC=(xz --format=lzma -dc) ;;
+    esac
+}
+
+u_tools_for() {   # type -> required tools (one word each)
+    case $1 in
+        zip|7z) echo 7z ;;
+        rar) echo unrar ;;
+        tar) echo tar ;;
+        gz) echo gzip ;; bz2) echo bzip2 ;; xz|lzma) echo xz ;; zst) echo zstd ;; lz4) echo lz4 ;;
+        iso) if have bsdtar; then echo bsdtar; else echo 7z; fi ;;
+        deb) echo dpkg-deb tar ;;
+        rpm) echo rpm2cpio cpio ;;
+        cpio) echo cpio ;;
+        ar) echo ar ;;
+        cab) echo cabextract ;;
+        squashfs) echo unsquashfs ;;
+    esac
+}
+
+u_peek_tar() {   # does the decompressed stream of A_FILE look like a tar?
+    local magic
+    DEC=()
+    u_dec_cmd "$1"
+    (( ${#DEC[@]} )) || return 1
+    magic=$("${DEC[@]}" "$A_FILE" 2>/dev/null | head -c 262 | tail -c 5 | tr -d '\000')
+    [[ $magic == ustar ]]
+}

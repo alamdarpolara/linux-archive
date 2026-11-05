@@ -1777,3 +1777,52 @@ u_peek_tar() {   # does the decompressed stream of A_FILE look like a tar?
     magic=$("${DEC[@]}" "$A_FILE" 2>/dev/null | head -c 262 | tail -c 5 | tr -d '\000')
     [[ $magic == ustar ]]
 }
+
+# ---- listing & safety scan ---------------------------------------------
+path_bad() {   # 0 (true) when a member path is absolute or climbs out
+    local p=${1//\\//}
+    [[ $p == /* || $p == .. || $p == ../* || $p == */../* || $p == */.. || $p =~ ^[A-Za-z]:/ ]]
+}
+
+scan_reset() {
+    N_ENTRIES=0 N_FILES=0 N_DIRS=0 N_LINKS=0 N_SPECIAL=0 SUM_SIZE=0 SIZE_KNOWN=1 CAP_HIT=0 LINK_THROUGH=0 LSL_BREAK=0
+    BAD_PATHS=() PREVIEW=() HARD=() WARN=()
+    LINKSET=() PARENTS=()
+}
+
+# scan_add <d|f|l|h|o> <size> <path> [hardlink-target]
+scan_add() {
+    local t=$1 sz=$2 p=$3 tgt=${4:-} anc mark
+    [[ $sz =~ ^[0-9]+$ ]] || sz=0
+    p=${p//\\//}
+    while [[ $p == ./* ]]; do p=${p#./}; done
+    p=${p%/}
+    [[ -z $p || $p == . ]] && return 0
+    N_ENTRIES=$(( N_ENTRIES + 1 ))
+    case $t in
+        d) N_DIRS=$(( N_DIRS + 1 )); mark='d' ;;
+        l) N_LINKS=$(( N_LINKS + 1 )); mark='l' ;;
+        o) N_SPECIAL=$(( N_SPECIAL + 1 )); mark='c' ;;
+        *) N_FILES=$(( N_FILES + 1 )); SUM_SIZE=$(( SUM_SIZE + sz )); mark='-' ;;
+    esac
+    if path_bad "$p"; then
+        (( ${#BAD_PATHS[@]} < 5 )) && BAD_PATHS+=("$p")
+    elif [[ $t == h && -n $tgt ]] && path_bad "$tgt"; then
+        (( ${#BAD_PATHS[@]} < 5 )) && BAD_PATHS+=("$p (hard link to $tgt)")
+    fi
+    # An entry stored *below* a symlink of the same archive is an attack.
+    anc=$p
+    while [[ $anc == */* ]]; do
+        anc=${anc%/*}
+        [[ -z $anc ]] && break
+        PARENTS[$anc]=1
+        [[ -n ${LINKSET[$anc]:-} ]] && LINK_THROUGH=1
+    done
+    if [[ $t == l ]]; then
+        LINKSET[$p]=1
+        [[ -n ${PARENTS[$p]:-} ]] && LINK_THROUGH=1
+    fi
+    if (( ${#PREVIEW[@]} < 12 )); then
+        PREVIEW+=("$(printf '%s %10s  %s' "$mark" "$(human "$sz")" "$p")")
+    fi
+}

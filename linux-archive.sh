@@ -1852,3 +1852,58 @@ parse_7z() {
     done <"$1"
     flush7
 }
+
+# GNU tar (info tar, "quoting-style"): --quoting-style=escape prints every name on one
+# line (newlines become \n); --numeric-owner keeps the owner column free of spaces.
+parse_tarv() {   # GNU tar -tv / unsquashfs -lls / dpkg tar  (mode owner size date time name)
+    local line t sz name tgt
+    local re='^([-dlhcbpsC])[-rwxsStTlL]{9}[+.@]?[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+|[0-9]+,[0-9]+)[[:space:]]+[0-9-]+[[:space:]]+[0-9:]+[[:space:]]+(.*)$'
+    while IFS= read -r line; do
+        if [[ $line =~ $re ]]; then
+            t=${BASH_REMATCH[1]} sz=${BASH_REMATCH[2]} name=${BASH_REMATCH[3]} tgt=""
+            case $t in
+                l) name=${name%% -> *}; t=l ;;
+                h) tgt=${name#* link to }; name=${name%% link to *} ;;
+                -|C) t=f ;;
+                d) ;;
+                *) t=o ;;
+            esac
+            if [[ $A_TYPE == squashfs ]]; then name=${name#squashfs-root}; name=${name#/}; fi
+            scan_add "$t" "$sz" "$name" "$tgt"
+        elif [[ -n $line && $line != tar:* && $line != LA-* ]]; then
+            # continuation of a multi-line name: check it conservatively
+            if path_bad "$line"; then (( ${#BAD_PATHS[@]} < 5 )) && BAD_PATHS+=("$line"); fi
+        fi
+    done <"$1"
+}
+
+parse_lsl() {   # bsdtar -tv / cpio -tv   (mode nlink owner group size mon day time name)
+    local line t sz name
+    local re='^([-dlhcbpsC])[-rwxsStTlL]{9}[+.@]?[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)[[:space:]]+[A-Za-z]{3}[[:space:]]+[0-9]+[[:space:]]+[0-9:]+[[:space:]]+(.*)$'
+    while IFS= read -r line; do
+        if [[ $line =~ $re ]]; then
+            t=${BASH_REMATCH[1]} sz=${BASH_REMATCH[2]} name=${BASH_REMATCH[3]}
+            case $t in
+                l) name=${name%% -> *} ;;
+                -|h|C) t=f ;;
+                d) ;;
+                *) t=o ;;
+            esac
+            scan_add "$t" "$sz" "$name"
+        elif [[ -n $line && $line != LA-* ]]; then
+            # A line that is not a listing record is either a tool diagnostic or
+            # the continuation of a member name that contains a line break (GNU
+            # cpio prints names raw, so "x<LF>/../../etc/p" lists as two lines
+            # and only the first would be checked).  Check it like a name ...
+            if path_bad "$line"; then (( ${#BAD_PATHS[@]} < 5 )) && BAD_PATHS+=("$line"); fi
+            # ... and for cpio/rpm, whose extractor does not strip "..", fail
+            # closed: an unexplained line is never silently skipped.
+            if [[ $A_TYPE == cpio || $A_TYPE == rpm ]] && [[ $line != cpio:* && $line != rpm2cpio:* && $line != error:* && $line != warning:* ]]; then
+                if (( ! LSL_BREAK )); then
+                    LSL_BREAK=1
+                    HARD+=("A member name contains a line break or other unreadable listing data - refused.")
+                fi
+            fi
+        fi
+    done <"$1"
+}

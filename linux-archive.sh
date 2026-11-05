@@ -1565,3 +1565,40 @@ zip_flow() {
         esac
     done
 }
+
+# ================================================================== UNZIP
+U_NAMES=() U_TYPES=() U_LABELS=() U_DETAILS=() U_FAKE=()
+A_FILE="" A_ABS="" A_TYPE="" A_TARC="" A_ENC=none A_PW="" A_NOLIST=0 A_BASE="" A_REAL=""
+L_STYLE=""
+N_ENTRIES=0 N_FILES=0 N_DIRS=0 N_LINKS=0 N_SPECIAL=0 SUM_SIZE=0 SIZE_KNOWN=1 CAP_HIT=0 LINK_THROUGH=0
+BAD_PATHS=() PREVIEW=() HARD=() WARN=() BAD_LINKS=() A_NOTES=()
+declare -A LINKSET=() PARENTS=()
+U_DEST="" U_REPLACE=0 STAGE="" STAGE_ABS="" OUTNAME=""
+X_CMD=() X_STDOUT=""
+DEC=()
+readonly MIB=1048576
+readonly WRONG_PW_RE='Wrong password|password is incorrect|Checksum error in the encrypted|wrong password'
+
+# One bash helper script for the few places that need a pipeline inside one
+# process group (so Ctrl+C kills everything).  It contains no user data: the
+# file names arrive as positional parameters.
+# shellcheck disable=SC2016  # the script is deliberately single-quoted: bash -c runs it
+readonly PIPE_SCRIPT='
+set -o pipefail
+case $1 in
+  tarz)   # list a compressed tar, reading at most $4 decompressed bytes
+    case $2 in
+      gz) d=(gzip -dc) ;; bz2) d=(bzip2 -dc) ;; xz) d=(xz -dc) ;; zst) d=(zstd -dc -q) ;;
+      lz4) d=(lz4 -dc -q) ;; lzma) d=(xz --format=lzma -dc) ;;
+    esac
+    "${d[@]}" "$3" | head -c "$4" | tar -tv --numeric-owner --quoting-style=escape -f -
+    st=("${PIPESTATUS[@]}")
+    if (( st[0] == 141 )); then echo "LA-CAP-REACHED" >&2; exit 0; fi
+    if (( st[0] != 0 )); then exit "${st[0]}"; fi
+    exit "${st[2]}" ;;
+  deb)  dpkg-deb --fsys-tarfile "$2" | tar -tv --numeric-owner --quoting-style=escape -f - ;;
+  rpm)  rpm2cpio "$2" | cpio -tv --quiet ;;
+  rpmx) rpm2cpio "$2" | cpio -idm --no-absolute-filenames --no-preserve-owner --quiet -D "$3" ;;
+  arx)  cd -- "$3" && exec ar x "$2" ;;
+esac
+'

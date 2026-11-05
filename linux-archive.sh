@@ -1602,3 +1602,104 @@ case $1 in
   arx)  cd -- "$3" && exec ar x "$2" ;;
 esac
 '
+
+ext_hint() {   # file name -> type implied by its extension ("" if none)
+    case ${1,,} in
+        *.tar.gz|*.tgz) echo tar.gz ;;
+        *.tar.bz2|*.tbz2|*.tbz) echo tar.bz2 ;;
+        *.tar.xz|*.txz) echo tar.xz ;;
+        *.tar.zst|*.tzst|*.tar.zstd) echo tar.zst ;;
+        *.tar.lz4) echo tar.lz4 ;;
+        *.tar.lzma|*.tlz) echo tar.lzma ;;
+        *.tar) echo tar ;;
+        *.zip|*.jar|*.war|*.ear|*.apk|*.aar) echo zip ;;
+        *.7z) echo 7z ;;
+        *.rar) echo rar ;;
+        *.gz) echo gz ;;
+        *.bz2) echo bz2 ;;
+        *.xz) echo xz ;;
+        *.zst|*.zstd) echo zst ;;
+        *.lz4) echo lz4 ;;
+        *.lzma) echo lzma ;;
+        *.iso) echo iso ;;
+        *.deb|*.udeb) echo deb ;;
+        *.rpm) echo rpm ;;
+        *.cpio) echo cpio ;;
+        *.a|*.ar) echo ar ;;
+        *.cab) echo cab ;;
+        *.squashfs|*.sqfs|*.sfs|*.sqsh) echo squashfs ;;
+    esac
+}
+
+# Folder name for the extraction: the archive name without its extension.
+strip_ext() {
+    local n=$1 lc=${1,,} e
+    for e in .tar.gz .tar.bz2 .tar.xz .tar.zst .tar.zstd .tar.lz4 .tar.lzma .tgz .tbz2 .tbz .txz .tzst .tlz \
+             .tar .zip .jar .war .ear .apk .aar .7z .rar .gz .bz2 .xz .zst .zstd .lz4 .lzma .iso .deb .udeb \
+             .rpm .cpio .ar .a .cab .squashfs .sqfs .sfs .sqsh; do
+        if [[ $lc == *"$e" && ${#n} -gt ${#e} ]]; then printf '%s' "${n:0:${#n}-${#e}}"; return; fi
+    done
+    printf '%s_extracted' "$n"
+}
+
+# Magic bytes of a file as lowercase hex (od is POSIX), e.g. "504b0304".
+hex_at() {   # hex_at <file> <offset> <count>
+    od -An -v -tx1 -j "$2" -N "$3" -- "$1" 2>/dev/null | tr -d ' \n'
+}
+
+# Header check used when file(1) is old or only says "octet-stream"
+# (signatures: zip PK\3\4, 7z 37 7A BC AF 27 1C, rar "Rar!\x1a\x07", gzip
+# 1F 8B, bzip2 "BZh", xz FD "7zXZ" 00, zstd 28 B5 2F FD, lz4 04 22 4D 18,
+# cab "MSCF", squashfs "hsqs", cpio "07070"[127], ar "!<arch>\n", rpm
+# ED AB EE DB, ISO 9660 "CD001" at offset 32769, tar "ustar" at 257).
+magic_type() {
+    local f=$1 h
+    h=$(hex_at "$f" 0 8)
+    case $h in
+        504b0304*|504b0506*) echo zip ;;
+        377abcaf271c*) echo 7z ;;
+        526172211a07*) echo rar ;;
+        1f8b*) echo gz ;;
+        425a68*) echo bz2 ;;
+        fd377a585a00*) echo xz ;;
+        28b52ffd*) echo zst ;;
+        04224d18*) echo lz4 ;;
+        4d534346*) echo cab ;;
+        68737173*|73717368*) echo squashfs ;;
+        3037303730[123]*) echo cpio ;;
+        213c617263683e0a*)
+            if [[ $(hex_at "$f" 8 13) == "64656269616e2d62696e617279" ]]; then echo deb; else echo ar; fi ;;
+        edabeedb*) echo rpm ;;
+        *)
+            if [[ $(hex_at "$f" 32769 5) == 4344303031 ]]; then echo iso
+            elif [[ $(hex_at "$f" 257 5) == 7573746172 ]]; then echo tar
+            fi ;;
+    esac
+}
+
+# file(1) mime type -> internal type, "" if not an archive.  Unknown or
+# generic answers fall back to the header check above, so old file(1)
+# versions (EL8 ships 5.33) still recognise e.g. zstd and lz4.
+mime_to_type() {
+    local mime=$1 file=$2
+    case $mime in
+        application/zip|application/x-zip*|application/java-archive|application/vnd.android.package-archive|*+zip) echo zip ;;
+        application/x-7z-compressed) echo 7z ;;
+        application/vnd.rar|application/x-rar|application/x-rar-compressed) echo rar ;;
+        application/x-tar|application/x-gtar|application/x-ustar) echo tar ;;
+        application/gzip|application/x-gzip) echo gz ;;
+        application/x-bzip2|application/x-bzip) echo bz2 ;;
+        application/x-xz) echo xz ;;
+        application/zstd|application/x-zstd) echo zst ;;
+        application/x-lz4) echo lz4 ;;
+        application/x-lzma) echo lzma ;;
+        application/x-iso9660-image) echo iso ;;
+        application/vnd.debian.binary-package|application/x-debian-package) echo deb ;;
+        application/x-rpm|application/x-redhat-package-manager) echo rpm ;;
+        application/x-cpio) echo cpio ;;
+        application/x-archive) magic_type "$file" ;;     # ar, or a deb named oddly
+        application/vnd.ms-cab-compressed|application/x-cab) echo cab ;;
+        text/*|inode/*|image/*|audio/*|video/*|application/pdf|application/x-empty) ;;
+        *) magic_type "$file" ;;
+    esac
+}

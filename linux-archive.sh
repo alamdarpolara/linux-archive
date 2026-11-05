@@ -1968,3 +1968,107 @@ parse_lsar() {
 # u_list: run the listing command for A_TYPE and scan it.
 #   0 ok | 1 failed (message printed) | 3 password needed | 4 wrong password
 #   5 encrypted, but the only available tool cannot take a password safely
+u_list() {
+    local raw="$WORKDIR/list.raw" cap rc usepw=0
+    local -a cmd=()
+    scan_reset
+    L_STYLE="" A_NOLIST=0
+    : >"$raw"
+    case $A_TYPE in
+        zip|7z) cmd=("$SZ" l -slt -ba -bd -- "$A_FILE"); L_STYLE=7z; usepw=1 ;;
+        rar)
+            case $RAR_BACKEND in
+                unrar) cmd=("$UNRAR" lt -- "$A_FILE"); L_STYLE=unrar; usepw=1 ;;
+                7z)    cmd=("$SZ" l -slt -ba -bd -- "$A_FILE"); L_STYLE=7z; usepw=1 ;;
+                unar)  cmd=("$LSAR" -nr -l "$A_FILE"); L_STYLE=lsar ;;
+                bsdtar) cmd=(bsdtar -tv --numeric-owner -f "$A_ABS"); L_STYLE=lsl ;;
+                *)     A_NOLIST=1; SIZE_KNOWN=0; return 0 ;;
+            esac ;;
+        tar)
+            if [[ -z $A_TARC ]]; then
+                cmd=(tar -tv --numeric-owner --quoting-style=escape -f "$A_ABS")
+            else
+                cap=$(( $(free_bytes .) + 1 ))
+                cmd=(bash -c "$PIPE_SCRIPT" linux-archive-pipe tarz "$A_TARC" "$A_ABS" "$cap")
+            fi
+            L_STYLE=tarv ;;
+        deb) cmd=(bash -c "$PIPE_SCRIPT" linux-archive-pipe deb "$A_ABS"); L_STYLE=tarv ;;
+        rpm) cmd=(bash -c "$PIPE_SCRIPT" linux-archive-pipe rpm "$A_ABS"); L_STYLE=lsl ;;
+        cpio) cmd=(cpio -tv --quiet -F "$A_ABS"); L_STYLE=lsl ;;
+        ar) cmd=(ar tv "$A_FILE"); L_STYLE=arv ;;
+        cab) cmd=(cabextract -l -- "$A_FILE"); L_STYLE=cab ;;
+        squashfs) cmd=(unsquashfs -n -lls "$A_FILE"); L_STYLE=tarv ;;
+        iso)
+            if have bsdtar; then cmd=(bsdtar -tv --numeric-owner -f "$A_ABS"); L_STYLE=lsl
+            else cmd=("$SZ" l -slt -ba -bd -- "$A_FILE"); L_STYLE=7z; fi ;;
+        gz|bz2|xz|zst|lz4|lzma)
+            A_NOLIST=1; SIZE_KNOWN=0
+            N_ENTRIES=1 N_FILES=1
+            PREVIEW+=("-    (unknown)  $(disp "$OUTNAME")")
+            return 0 ;;
+    esac
+    (( usepw )) && JOB_SECRET=$A_PW
+    JOB_STDOUT_FILE=$raw
+    JOB_TIMEOUT=$LIMIT_LIST_TIMEOUT
+    run_job "Reading archive" "${cmd[@]}"
+    rc=$JOB_RC
+    if (( rc == 124 || rc == 137 )) && have timeout; then
+        msg_err "Reading the archive took longer than $LIMIT_LIST_TIMEOUT s - stopped (hostile or broken archive?)."
+        return 1
+    fi
+    # 7-Zip and unrar print prompts/errors on either stream; look at both.
+    cat "$JOB_LOG" >>"$raw"
+    if (( usepw )); then
+        if [[ -z $A_PW ]] && grep -qE 'Enter password' "$raw"; then A_ENC=header; return 3; fi
+        if [[ -n $A_PW ]] && grep -qiE "$WRONG_PW_RE" "$raw"; then return 4; fi
+    fi
+    if [[ $A_TYPE == rar && $RAR_BACKEND == bsdtar ]] && (( rc != 0 )) && grep -qiE 'encrypt|passphrase|password' "$raw"; then
+        A_ENC=header
+        return 5
+    fi
+    if (( rc > 1 )); then
+        msg_err "Cannot read this archive (exit code $rc) - it looks damaged, truncated or unsupported."
+        job_log_show 5
+        return 1
+    fi
+    if [[ $L_STYLE == lsar ]] && grep -q 'requires a password' "$raw"; then A_ENC=header; return 5; fi
+    # File-count bomb: count the members first, so a listing with millions of
+    # lines is refused without feeding it through the (slow) bash parser.
+    local nent
+    if [[ $L_STYLE == 7z ]]; then nent=$(grep -c '^Path = ' "$raw"); else nent=$(wc -l <"$raw"); fi
+    nent=${nent//[[:space:]]/}
+    if [[ $nent =~ ^[0-9]+$ ]] && (( nent > LIMIT_MAX_ENTRIES )); then
+        N_ENTRIES=$nent SIZE_KNOWN=0
+        return 0
+    fi
+    case $L_STYLE in
+        lsar)  parse_lsar "$raw"; [[ $A_ENC != none ]] && return 5 ;;
+        7z)    parse_7z "$raw"; grep -q '^Encrypted = +' "$raw" && [[ $A_ENC == none ]] && A_ENC=data ;;
+        unrar) parse_unrar "$raw"; grep -q 'Flags:.*encrypted' "$raw" && [[ $A_ENC == none ]] && A_ENC=data ;;
+        tarv)  parse_tarv "$raw" ;;
+        lsl)   parse_lsl "$raw" ;;
+        arv)   parse_ar "$raw" ;;
+        cab)   parse_cab "$raw" ;;
+    esac
+    if grep -q 'LA-CAP-REACHED' "$JOB_LOG" 2>/dev/null; then CAP_HIT=1; fi
+    # RAR4 header encryption has no password check: ~1 in 256 wrong passwords
+    # "decrypt" to an empty-looking archive.  An encrypted archive that lists
+    # nothing is therefore treated as a wrong password.
+    if [[ $A_ENC == header && -n $A_PW ]] && (( N_ENTRIES == 0 )); then return 4; fi
+    if (( rc == 1 )); then WARN+=("The tool reported warnings while reading the archive."); fi
+    # GNU tar already strips "../" and "/" from HARD LINK TARGETS in the
+    # listing itself (it prints "Removing leading `../' from hard link
+    # targets" and the stripped name), so such a link is only visible through
+    # that message: a link that points out of the archive is an attack.
+    if [[ $L_STYLE == tarv ]] && grep -q "from hard link targets" "$JOB_LOG" 2>/dev/null; then
+        BAD_PATHS+=("a hard link whose target is absolute or climbs out with '..' (tar: $(grep -m1 'from hard link targets' "$JOB_LOG" | sed 's/^[^:]*: //'))")
+    fi
+    # GNU tar strips these itself on extraction, but the user should know.
+    if [[ $L_STYLE == tarv ]] && grep -qE "Removing leading|Member name contains" "$JOB_LOG" 2>/dev/null; then
+        WARN+=("The archive contains absolute or '..' names/link targets; tar neutralises them (strips them) when extracting.")
+    fi
+    if [[ $L_STYLE == 7z && $A_TYPE == zip ]] && grep -q '^Encrypted = +' "$raw" && grep -q 'ZipCrypto' "$raw"; then
+        WARN+=("This ZIP uses the weak legacy ZipCrypto encryption.")
+    fi
+    return 0
+}

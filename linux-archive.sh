@@ -2374,3 +2374,45 @@ u_fail() {
     STAGE="" PARTIAL_PATH="" CUR_OP=""
     msg_info "Nothing was extracted; the partial output was deleted."
 }
+
+# Extract into a staging folder, check it, then move it into place.
+# Hard links whose inode has more links than the staging tree contains point
+# at a file OUTSIDE the new folder (a write through them would change it).
+u_audit_hardlinks() {   # prints the number of escaping hard links
+    local ino n bad=0
+    declare -A seen=() want=()
+    while read -r ino n; do
+        seen[$ino]=$(( ${seen[$ino]:-0} + 1 ))
+        want[$ino]=$n
+    done < <(find "$STAGE_ABS" -xdev ! -type d -links +1 -printf '%i %n\n' 2>/dev/null)
+    for ino in "${!want[@]}"; do
+        (( seen[$ino] < want[$ino] )) && bad=$(( bad + 1 ))
+    done
+    printf '%d' "$bad"
+}
+
+# Remove what must never come out of an untrusted archive: device nodes,
+# FIFOs and sockets; setuid/setgid/sticky bits; world-writable permissions;
+# foreign ownership when running as root.  Prints a summary line per fix.
+u_sanitize_tree() {
+    local n
+    n=$(find "$STAGE_ABS" -mindepth 1 \( -type b -o -type c -o -type p -o -type s \) 2>/dev/null | wc -l)
+    if (( n > 0 )); then
+        find "$STAGE_ABS" -mindepth 1 \( -type b -o -type c -o -type p -o -type s \) -delete 2>/dev/null
+        printf 'Removed %d device/FIFO/socket entr%s.\n' "$n" "$( (( n == 1 )) && echo y || echo ies)"
+    fi
+    n=$(find "$STAGE_ABS" ! -type l -perm /7000 2>/dev/null | wc -l)
+    if (( n > 0 )); then
+        find "$STAGE_ABS" ! -type l -perm /7000 -exec chmod u-s,g-s,o-t -- {} + 2>/dev/null
+        printf 'Removed setuid/setgid/sticky bits from %d entr%s.\n' "$n" "$( (( n == 1 )) && echo y || echo ies)"
+    fi
+    n=$(find "$STAGE_ABS" ! -type l -perm -0002 2>/dev/null | wc -l)
+    if (( n > 0 )); then
+        find "$STAGE_ABS" ! -type l -perm -0002 -exec chmod o-w -- {} + 2>/dev/null
+        printf 'Removed world-write permission from %d entr%s.\n' "$n" "$( (( n == 1 )) && echo y || echo ies)"
+    fi
+    if (( EUID == 0 )); then
+        chown -R -h 0:0 -- "$STAGE_ABS" 2>/dev/null
+        printf 'Ownership of all extracted entries set to root:root (running as root).\n'
+    fi
+}

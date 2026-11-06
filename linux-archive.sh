@@ -2543,3 +2543,67 @@ u_extract() {
     echo
     return 0
 }
+
+u_pick_archive() {
+    u_scan
+    if (( ${#U_NAMES[@]} == 0 )); then
+        screen_begin "UNZIP"
+        msg_warn "No supported archive files in this folder."
+        if (( ${#U_FAKE[@]} )); then
+            msg_info "Hidden: ${#U_FAKE[@]} file(s) have an archive extension but no valid archive content:"
+            local f n=0
+            for f in "${U_FAKE[@]}"; do (( n++ < 5 )) && printf '   %s\n' "$(disp "$f")"; done
+        fi
+        pause_key
+        return 1
+    fi
+    screen_begin "UNZIP  -  choose an archive"
+    (( ${#U_FAKE[@]} )) && ui_note_info "${#U_FAKE[@]} file(s) with an archive extension but invalid content are hidden."
+    menu_single "Choose the archive to extract" "Only real archives are shown (checked by content, not just by extension)" U_LABELS U_DETAILS 0 || return 1
+    A_FILE="./${U_NAMES[MENU_INDEX]}"
+    A_REAL=${U_TYPES[MENU_INDEX]}
+    return 0
+}
+
+# Resolve A_TYPE / A_TARC / OUTNAME for the selected archive.
+u_resolve() {
+    local hint name=${A_FILE#./}
+    A_NOTES=()
+    A_ABS=$PWD/$name
+    A_TYPE=$A_REAL A_TARC="" A_BASE=$(strip_ext "$name")
+    A_BASE=${A_BASE//[[:cntrl:]]/_}
+    hint=$(ext_hint "$name")
+    case $A_REAL in
+        gz|bz2|xz|zst|lz4|lzma)
+            # shellcheck disable=SC2046  # u_tools_for prints a fixed word list
+            need_tools $(u_tools_for "$A_REAL") || return 1
+            if u_peek_tar "$A_REAL"; then A_TYPE=tar A_TARC=$A_REAL
+            elif [[ $hint == tar.* ]]; then A_NOTES+=("W:The name says tar archive but the content is a single compressed file."); fi
+            OUTNAME=${name%.*}
+            [[ -z $OUTNAME || $OUTNAME == "$name" ]] && OUTNAME=decompressed
+            OUTNAME=${OUTNAME//[[:cntrl:]]/_}
+            OUTNAME=${OUTNAME//\//_} ;;
+    esac
+    if [[ -n $hint && $hint != "$A_REAL" && $hint != tar.* && ! ( $hint == zip && $A_REAL == zip ) ]]; then
+        A_NOTES+=("I:The extension says '$hint' but the content is '$A_REAL' - using the real type.")
+    fi
+    # shellcheck disable=SC2046  # u_tools_for prints a fixed word list
+    need_tools $(u_tools_for "$A_TYPE") || return 1
+    if [[ $A_TYPE == rar ]]; then
+        pick_rar_backend
+        case $RAR_BACKEND in
+            unrar-free)
+                A_NOTES+=("W:Only unrar-free is installed: encrypted RAR and some RAR5 files are NOT supported")
+                A_NOTES+=("W:and the content preview is limited.  The non-free 'unrar' package fixes that.") ;;
+            unar)
+                A_NOTES+=("W:Using unar for RAR: encrypted RAR archives are refused (unar takes passwords only on argv).") ;;
+            bsdtar)
+                A_NOTES+=("W:Using bsdtar (libarchive) for RAR: encrypted RAR archives are not supported.") ;;
+            7z) A_NOTES+=("I:RAR is handled by 7-Zip's RAR decoder.") ;;
+        esac
+    fi
+    if [[ $A_TYPE == iso ]] && ! have bsdtar; then
+        A_NOTES+=("W:bsdtar is missing: 7-Zip will be used for ISO, which drops symlinks and permissions.")
+    fi
+    return 0
+}

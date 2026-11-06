@@ -2319,3 +2319,58 @@ u_recreate_7z_links() {
         ln -s -- "$lt" "$STAGE_ABS/$lp" && U_RECREATED_LINKS=$(( U_RECREATED_LINKS + 1 ))
     done < <(grep 'Dangerous link path was ignored : ' "$JOB_LOG")
 }
+
+u_extract_ok() {   # judge the finished extraction job
+    case $A_TYPE in
+        rar)
+            case $RAR_BACKEND in
+                unrar-free) grep -q 'Failed' "$JOB_LOG" && return 1; (( JOB_RC <= 1 )) ;;
+                7z) (( JOB_RC <= 1 )) || { (( JOB_RC == 2 )) && u_7z_skipped_only; } ;;
+                unar|bsdtar) (( JOB_RC == 0 )) ;;
+                *) (( JOB_RC <= 1 )) ;;
+            esac ;;
+        zip|7z) (( JOB_RC <= 1 )) || { (( JOB_RC == 2 )) && u_7z_skipped_only; } ;;
+        tar) (( JOB_RC <= 1 )) ;;
+        *) (( JOB_RC == 0 )) ;;
+    esac
+}
+
+# Dangerous symlinks (absolute target or resolving outside the new folder).
+u_audit_links() {   # fills BAD_LINKS; returns 0 when none
+    local p real root
+    BAD_LINKS=()
+    root=$(realpath -- "$STAGE_ABS")
+    while IFS= read -r -d '' p; do
+        real=$(realpath -m -- "$p" 2>/dev/null) || real=""
+        if [[ -z $real || ( $real != "$root" && $real != "$root"/* ) ]]; then BAD_LINKS+=("$p"); fi
+    done < <(find "$STAGE_ABS" -type l -print0)
+    (( ${#BAD_LINKS[@]} == 0 ))
+}
+
+u_handle_links() {   # 0 continue, 1 abort extraction
+    local p shown=0
+    local -a l=("Remove them and continue (recommended)" "Keep them as they are" "Abort - delete everything extracted")
+    local -a d=("" "they may point at files outside the new folder" "")
+    u_audit_links && return 0
+    screen_begin "UNZIP  -  dangerous symlinks"
+    ui_note_warn "${#BAD_LINKS[@]} symlink(s) point outside the new folder (absolute or '..' targets):"
+    for p in "${BAD_LINKS[@]}"; do
+        (( shown++ < 6 )) && ui_note "   $(disp "${p#"$STAGE_ABS"/}") -> $(disp "$(readlink -- "$p")")"
+    done
+    (( ${#BAD_LINKS[@]} > 6 )) && ui_note "   ... and $(( ${#BAD_LINKS[@]} - 6 )) more"
+    menu_single "What should happen to these symlinks?" "" l d 0 || return 1
+    case $MENU_INDEX in
+        0) for p in "${BAD_LINKS[@]}"; do rm -f -- "$p"; done; msg_info "Removed ${#BAD_LINKS[@]} symlink(s)." ;;
+        1) msg_warn "Keeping dangerous symlinks - do not follow them blindly." ;;
+        2) return 1 ;;
+    esac
+    return 0
+}
+
+u_fail() {
+    msg_err "$1"
+    job_log_show 8
+    [[ -n $STAGE ]] && rm -rf -- "$STAGE"
+    STAGE="" PARTIAL_PATH="" CUR_OP=""
+    msg_info "Nothing was extracted; the partial output was deleted."
+}

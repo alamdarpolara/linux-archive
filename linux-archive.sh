@@ -2219,3 +2219,53 @@ u_pick_dest() {
         esac
     done
 }
+
+# Tool notes (verified with --help/man): unrar x -idq -o+ -y <archive> <dest/> (dest needs the
+# trailing slash); unsquashfs -n -f -no-xattrs -d <dir>; ar x run inside the target dir
+# (`ar x --output` needs binutils >= 2.34, EL8 has 2.30); cabextract -q -d <dir>;
+# dpkg-deb -R <deb> <dir> (data + DEBIAN/); cpio -idm --no-absolute-filenames
+# --no-preserve-owner -D <dir> -F <file>; bsdtar -x --no-same-owner --no-same-permissions
+# (libarchive keeps ISO Rock Ridge symlinks/modes, 7-Zip does not); GNU tar -x
+# --no-same-owner --no-same-permissions (owner/mode from the archive are not trusted
+# even when running as root); unar -nr -q -D -o <dir> (unar -h: no recursion into
+# inner archives, no extra containing folder).
+u_build_extract() {   # uses STAGE_ABS
+    local prog
+    X_CMD=() X_STDOUT=""
+    case $A_TYPE in
+        zip|7z) X_CMD=("$SZ" x -y -bd "-o$STAGE_ABS" -- "$A_FILE") ;;
+        rar)
+            case $RAR_BACKEND in
+                unrar) X_CMD=("$UNRAR" x -idq -o+ -y -- "$A_FILE" "$STAGE_ABS/") ;;
+                7z)    X_CMD=("$SZ" x -y -bd "-o$STAGE_ABS" -- "$A_FILE") ;;
+                unar)  X_CMD=("$UNAR" -nr -q -D -o "$STAGE_ABS" "$A_FILE") ;;
+                bsdtar) X_CMD=(bsdtar -x -f "$A_ABS" -C "$STAGE_ABS" --no-same-owner --no-same-permissions) ;;
+                *)     X_CMD=("$UNRAR_FREE" -x -f "$A_FILE" "$STAGE_ABS") ;;
+            esac ;;
+        tar)
+            X_CMD=(tar -x -f "$A_ABS" -C "$STAGE_ABS" --no-same-owner --no-same-permissions)
+            if [[ -n $A_TARC ]]; then
+                case $A_TARC in
+                    gz) prog=gzip ;; bz2) prog=bzip2 ;; xz) prog=xz ;; zst) prog=zstd ;;
+                    lz4) prog=lz4 ;; lzma) prog="xz --format=lzma" ;;
+                esac
+                X_CMD+=(-I "$prog")
+            fi ;;
+        gz|bz2|xz|zst|lz4|lzma)
+            u_dec_cmd "$A_TYPE"
+            X_CMD=("${DEC[@]}" "$A_FILE")
+            X_STDOUT="$STAGE_ABS/$OUTNAME" ;;
+        iso)
+            if have bsdtar; then X_CMD=(bsdtar -x -f "$A_ABS" -C "$STAGE_ABS" --no-same-owner --no-same-permissions)
+            else X_CMD=("$SZ" x -y -bd "-o$STAGE_ABS" -- "$A_FILE"); fi ;;
+        deb) X_CMD=(dpkg-deb -R "$A_FILE" "$STAGE_ABS") ;;
+        rpm) X_CMD=(bash -c "$PIPE_SCRIPT" linux-archive-pipe rpmx "$A_ABS" "$STAGE_ABS") ;;
+        cpio) X_CMD=(cpio -idm --no-absolute-filenames --no-preserve-owner --quiet -D "$STAGE_ABS" -F "$A_ABS") ;;
+        ar) X_CMD=(bash -c "$PIPE_SCRIPT" linux-archive-pipe arx "$A_ABS" "$STAGE_ABS") ;;
+        cab) X_CMD=(cabextract -q -d "$STAGE_ABS" -- "$A_FILE") ;;
+        # -f: squashfs-tools < 4.6 refuse to write into an EXISTING directory,
+        # even the fresh empty staging folder (verified with 4.5 on Ubuntu 22.04).
+        # (No -q anywhere: unsquashfs 4.3 on EL8 has no such option.)
+        squashfs) X_CMD=(unsquashfs -n -f -no-xattrs -d "$STAGE_ABS" "$A_FILE") ;;
+    esac
+}

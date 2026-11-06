@@ -2702,3 +2702,56 @@ cli_item() {
     fi
     CLI_ITEMS+=("./$n")
 }
+
+cli_parse() {
+    local arg endopts=0 action="" op="" subcmd_seen=0
+    local -a operands=()
+    while (( $# )); do
+        arg=$1; shift
+        if (( ! endopts )); then
+            case $arg in
+                --) endopts=1; continue ;;
+                --plain) FORCE_PLAIN=1; continue ;;
+                --no-color) FORCE_NOCOLOR=1; continue ;;
+                --check|--verify|-h|--help|-V|--version)
+                    [[ -z $action ]] || { cli_error "only one informational option may be used"; return 2; }
+                    action=$arg; continue ;;
+                -*) cli_error "unknown option '$(disp "$arg")'"; return 2 ;;
+            esac
+        fi
+        if (( ! subcmd_seen )); then
+            case $arg in
+                zip|unzip) op=$arg ;;
+                7z|tar|tar.gz|tar.bz2|tar.xz|tar.zst|squashfs|gz|xz|zst) op=zip; CLI_FMT=$arg ;;
+                tgz) op=zip; CLI_FMT=tar.gz ;;
+                *) cli_error "unknown subcommand '$(disp "$arg")'"; return 2 ;;
+            esac
+            subcmd_seen=1
+        else
+            operands+=("$arg")
+        fi
+    done
+    if [[ -n $action ]]; then
+        if (( subcmd_seen || ${#operands[@]} )); then cli_error "informational options cannot be combined with a subcommand"; return 2; fi
+        case $action in
+            --check) find_7z; find_unrar; print_check; return $? ;;
+            --verify) print_verify; return $? ;;
+            -h|--help) usage; return 0 ;;
+            -V|--version) printf '%s %s\n' "$INVOKED_AS" "$LA_VERSION"; return 0 ;;
+        esac
+    fi
+    [[ -n $op ]] || { (( ${#operands[@]} == 0 )) || { cli_error "items require a subcommand"; return 2; }; return 3; }
+    CLI_OP=$op CLI_DIRECT=1
+    if [[ $CLI_FMT == gz || $CLI_FMT == xz || $CLI_FMT == zst ]] && (( ${#operands[@]} > 1 )); then
+        cli_error "$CLI_FMT requires exactly one regular file"; return 2
+    fi
+    for arg in "${operands[@]}"; do cli_item "$arg" || return 2; done
+    if [[ $CLI_FMT == gz || $CLI_FMT == xz || $CLI_FMT == zst ]] && (( ${#CLI_ITEMS[@]} )) && ! z_single_cli_file; then
+        cli_error "$CLI_FMT requires one regular file (not a symlink)"; return 2
+    fi
+    return 3                 # continue into the interactive flow
+}
+
+z_single_cli_file() {
+    [[ -f ${CLI_ITEMS[0]} && ! -L ${CLI_ITEMS[0]} ]]
+}

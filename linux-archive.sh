@@ -2416,3 +2416,130 @@ u_sanitize_tree() {
         printf 'Ownership of all extracted entries set to root:root (running as root).\n'
     fi
 }
+
+u_extract() {
+    local attempt=0 limit free reserve declared nf nd nl total trash t0 t1 expected_note="" why="" hl line
+    local -a fixes=()
+    STAGE=$(mktemp -d ./.linux-archive.XXXXXX) || { msg_err "Cannot create a temporary folder here (is the folder writable?)"; return 1; }
+    PARTIAL_PATH=$STAGE
+    STAGE_ABS=$PWD/${STAGE#./}
+    free=$(free_bytes .)
+    reserve=$(( free / 20 ))
+    (( reserve < 128 * MIB )) && reserve=$(( 128 * MIB ))
+    (( reserve > free / 2 )) && reserve=$(( free / 2 ))
+    limit=$(( free - reserve ))
+    if (( SIZE_KNOWN )); then
+        # du counts allocated blocks: allow one 4 KiB block per member on top.
+        declared=$(( SUM_SIZE * 2 + 64 * MIB + (N_DIRS + N_FILES + N_LINKS) * 8192 ))
+        (( declared < limit )) && limit=$declared
+    fi
+    CUR_OP=extract
+    t0=$SECONDS
+    screen_begin "UNZIP  -  extracting $(disp "$A_FILE")"
+    while :; do
+        attempt=$(( attempt + 1 ))
+        if [[ $A_ENC != none && -z $A_PW ]]; then
+            u_ask_password || { u_fail "No password given."; return 1; }
+        fi
+        find "$STAGE_ABS" -mindepth 1 -delete 2>/dev/null
+        U_SKIPPED_LINKS=0
+        u_build_extract
+        JOB_WATCH_DIR=$STAGE_ABS
+        JOB_WATCH_LIMIT=$limit
+        JOB_STDOUT_FILE=$X_STDOUT
+        [[ $A_TYPE == zip || $A_TYPE == 7z || $A_TYPE == rar ]] && JOB_SECRET=$A_PW
+        run_job "Extracting" "${X_CMD[@]}"
+        if [[ $JOB_ABORT == limit ]]; then
+            u_fail "Extraction stopped: the output grew beyond $(human "$limit") (more than the archive declared or the disk can hold) - possible ZIP BOMB."
+            return 1
+        fi
+        if u_extract_ok; then break; fi
+        if [[ $A_TYPE == rar ]] && ! rar_backend_decrypts && job_log_has '[Pp]assword|[Pp]assphrase|[Ee]ncrypt'; then
+            u_fail "This RAR archive is encrypted, and the RAR tool available here ($RAR_BACKEND) cannot take a password safely (only on its command line or terminal). Install the non-free unrar or a 7-Zip with the RAR decoder (sudo ./install.sh --with-nonfree)."
+            return 1
+        fi
+        if [[ -n $A_PW || $A_ENC != none ]] && job_log_has "$WRONG_PW_RE"; then
+            msg_warn "Wrong password."
+            wipe_var A_PW; A_PW=""
+            if (( attempt >= 3 )); then u_fail "Too many wrong passwords."; return 1; fi
+            continue
+        fi
+        if [[ $A_ENC == none && -z $A_PW ]] && job_log_has "Enter password|password"; then
+            A_ENC=data
+            continue
+        fi
+        if job_log_has 'No space left on device|Disk quota exceeded'; then
+            u_fail "Extraction stopped: the disk is full - the archive expands to more than the free space ($(human "$free")): possible ZIP BOMB."
+            return 1
+        fi
+        u_fail "Extraction failed (exit code $JOB_RC) - the archive may be damaged or truncated."
+        return 1
+    done
+    if (( JOB_RC == 1 )); then msg_warn "The tool reported warnings:"; job_log_show 4; fi
+    if [[ $A_TYPE == zip || $A_TYPE == 7z ]] || { [[ $A_TYPE == iso ]] && ! have bsdtar; }; then
+        u_fix_7z_links
+        if (( U_SKIPPED_LINKS > 0 )); then
+            u_recreate_7z_links
+            msg_warn "7-Zip refused $U_SKIPPED_LINKS symlink(s) whose target is absolute or climbs out of the folder;"
+            msg_warn "$U_RECREATED_LINKS of them were recreated for the review below (remove or keep):"
+            grep 'Dangerous link path was ignored' "$JOB_LOG" | head -n 5 | while IFS= read -r line; do printf '   %s\n' "$(disp "$line")"; done
+        fi
+    fi
+    # --- post-extraction hardening and verification
+    hl=$(u_audit_hardlinks)
+    if (( hl > 0 )); then
+        u_fail "Refused: $hl hard link(s) in the archive point at files OUTSIDE the new folder."
+        return 1
+    fi
+    u_handle_links || { u_fail "Extraction aborted by the user."; return 1; }
+    while IFS= read -r line; do fixes+=("$line"); done < <(u_sanitize_tree)
+    chmod "$(printf '%03o' $(( 0777 & ~(8#$(umask)) )))" -- "$STAGE_ABS" 2>/dev/null
+    nf=$(find "$STAGE_ABS" -mindepth 1 -type f 2>/dev/null | wc -l)
+    nd=$(find "$STAGE_ABS" -mindepth 1 -type d 2>/dev/null | wc -l)
+    nl=$(find "$STAGE_ABS" -mindepth 1 -type l 2>/dev/null | wc -l)
+    total=$(tree_bytes "$STAGE_ABS")
+    if (( nf + nd + nl == 0 )); then
+        if (( A_NOLIST )) || (( N_ENTRIES > 0 )); then
+            u_fail "Nothing was extracted$([[ $A_TYPE == rar && $RAR_BACKEND != unrar && $RAR_BACKEND != 7z ]] && printf ' - encrypted or RAR5 archives need the non-free "unrar" or a 7-Zip with RAR support (see install.sh)')."
+            return 1
+        fi
+    fi
+    if (( ! A_NOLIST )) && (( nf != N_FILES )); then
+        expected_note="expected $N_FILES files from the listing but found $nf (special files such as devices or sockets are not created)"
+    fi
+    # --- move into place (under the directory lock; see z_commit)
+    if ! dir_lock; then u_fail "Could not lock the folder (another linux-archive run is busy here)."; return 1; fi
+    if [[ -L ./$U_DEST ]]; then
+        why="'$(disp "$U_DEST")' is a symbolic link - refused."
+    elif (( U_REPLACE )) && path_exists "./$U_DEST"; then
+        if trash=$(mktemp -d ./.linux-archive.XXXXXX); then
+            if ! mv -T -- "./$U_DEST" "$trash/old"; then
+                why="Cannot replace the existing '$(disp "$U_DEST")'."
+            elif ! mv -T -- "$STAGE" "./$U_DEST"; then
+                mv -T -- "$trash/old" "./$U_DEST"
+                why="Cannot move the extracted files into place; the old folder was restored."
+            fi
+            rm -rf -- "$trash"
+        else
+            why="Cannot create a temporary folder."
+        fi
+    elif path_exists "./$U_DEST" || ! mv -T -- "$STAGE" "./$U_DEST"; then
+        why="Cannot create '$(disp "$U_DEST")' (it appeared meanwhile?)."
+    fi
+    dir_unlock
+    if [[ -n $why ]]; then u_fail "$why"; return 1; fi
+    STAGE="" PARTIAL_PATH="" CUR_OP=""
+    t1=$SECONDS
+    msg_ok "Extraction finished and verified."
+    echo
+    box_print "Result" \
+        "Folder:    $U_DEST/" \
+        "Files:     $nf     Folders: $nd     Links: $nl" \
+        "Size:      $(human "$total")" \
+        "Time:      $(( t1 - t0 )) s" \
+        "Check:     extraction tool reported success$([[ -n $expected_note ]] && printf ', see note')"
+    [[ -n $expected_note ]] && msg_warn "Note: $expected_note."
+    for line in "${fixes[@]}"; do msg_info "$line"; done
+    echo
+    return 0
+}

@@ -2269,3 +2269,53 @@ u_build_extract() {   # uses STAGE_ABS
         squashfs) X_CMD=(unsquashfs -n -f -no-xattrs -d "$STAGE_ABS" "$A_FILE") ;;
     esac
 }
+
+# 7-Zip silently rewrites absolute symlink targets to "<output dir>/<target>" and
+# refuses (exit 2, "Dangerous link path was ignored") links that climb out of
+# the output folder.  Both behaviours are safe but unfaithful, so: restore the
+# original absolute target (u_audit_links then lets the user decide) and do
+# not treat "only dangerous links skipped" as a failure.
+U_SKIPPED_LINKS=0
+u_7z_skipped_only() {   # exit 2 caused solely by skipped dangerous links?
+    local nd ne
+    nd=$(grep -c 'Dangerous link path was ignored' "$JOB_LOG")
+    ne=$(grep -c '^ERROR:' "$JOB_LOG")
+    (( nd > 0 && nd == ne )) && { U_SKIPPED_LINKS=$nd; return 0; }
+    return 1
+}
+
+u_fix_7z_links() {
+    local p t
+    while IFS= read -r -d '' p; do
+        t=$(readlink -- "$p")
+        if [[ $t == "$STAGE_ABS"/* ]]; then ln -sfn -- "${t#"$STAGE_ABS"}" "$p"; fi
+    done < <(find "$STAGE_ABS" -type l -print0)
+}
+
+# 7-Zip before 22 does not rewrite absolute link targets; it skips every
+# "dangerous" link and logs "ERROR: Dangerous link path was ignored : <path> :
+# <target>" (verified with 7-Zip 21.07).  Recreate exactly those links inside
+# the staging folder so that u_handle_links lets the USER decide (remove /
+# keep) - the same choice 7-Zip >= 22 leads to.  A line is used only when it
+# splits unambiguously and the link path is a safe relative path whose parent
+# is a real directory inside the staging folder.
+U_RECREATED_LINKS=0
+u_recreate_7z_links() {
+    local line rest lp lt parent root rp
+    U_RECREATED_LINKS=0
+    root=$(realpath -- "$STAGE_ABS")
+    while IFS= read -r line; do
+        rest=${line#*Dangerous link path was ignored : }
+        [[ $rest == *" : "* ]] || continue
+        lp=${rest%% : *} lt=${rest#* : }
+        [[ $lt == *" : "* || -z $lp || -z $lt ]] && continue      # ambiguous
+        path_bad "$lp" && continue
+        [[ $lp != *[[:cntrl:]]* && $lt != *[[:cntrl:]]* ]] || continue
+        parent=$(dirname -- "$STAGE_ABS/$lp")
+        [[ -d $parent && ! -L $parent ]] || continue
+        rp=$(realpath -m -- "$parent")
+        [[ $rp == "$root" || $rp == "$root"/* ]] || continue
+        path_exists "$STAGE_ABS/$lp" && continue
+        ln -s -- "$lt" "$STAGE_ABS/$lp" && U_RECREATED_LINKS=$(( U_RECREATED_LINKS + 1 ))
+    done < <(grep 'Dangerous link path was ignored : ' "$JOB_LOG")
+}

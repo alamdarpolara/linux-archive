@@ -2607,3 +2607,46 @@ u_resolve() {
     fi
     return 0
 }
+
+unzip_flow() {
+    local step=pick rc
+    [[ -w . ]] || { screen_begin "UNZIP"; msg_err "The current folder is not writable."; (( CLI_DIRECT )) || pause_key; return 1; }
+    need_tools file || { (( CLI_DIRECT )) || pause_key; return 1; }
+    if (( ${#CLI_ITEMS[@]} )); then step=open; fi
+    while :; do
+        case $step in
+            pick) u_pick_archive || return 0; step=open ;;
+            open)
+                screen_begin "UNZIP  -  $(disp "$A_FILE")"
+                if ! u_resolve; then (( CLI_DIRECT )) && return 1; pause_key; step=pick; continue; fi
+                if ! u_open; then forget_apw; (( CLI_DIRECT )) && return 1; pause_key; step=pick; continue; fi
+                u_analyze
+                step=review ;;
+            review)
+                screen_begin "UNZIP  -  review"
+                u_preview
+                if (( ${#HARD[@]} )); then
+                    screen_flush
+                    msg_err "Extraction refused for safety."
+                    forget_apw
+                    (( CLI_DIRECT )) && return 1
+                    pause_key; step=pick; continue
+                fi
+                local -a l=("Extract" "Cancel")
+                if (( ${#WARN[@]} )); then l[0]="Extract anyway (I understand the warnings)"; fi
+                menu_single "Next step" "" l NOARR $(( ${#WARN[@]} ? 1 : 0 )) || { forget_apw; (( CLI_DIRECT )) && return 0; step=pick; continue; }
+                if (( MENU_INDEX == 1 )); then forget_apw; (( CLI_DIRECT )) && return 0; step=pick; continue; fi
+                step=dest ;;
+            dest)
+                u_pick_dest; rc=$?
+                case $rc in 0) step=run ;; 1) step=review ;; 2) forget_apw; (( CLI_DIRECT )) && return 0; step=pick ;; esac ;;
+            run)
+                u_extract; rc=$?
+                forget_apw
+                (( CLI_DIRECT )) || pause_key
+                return "$rc" ;;
+        esac
+    done
+}
+
+# ===================================================================== main

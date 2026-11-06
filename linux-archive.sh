@@ -2755,3 +2755,80 @@ cli_parse() {
 z_single_cli_file() {
     [[ -f ${CLI_ITEMS[0]} && ! -L ${CLI_ITEMS[0]} ]]
 }
+
+main_menu() {
+    local -a l=("Zip    - create an archive" "Unzip  - extract an archive" "Quit")
+    # shellcheck disable=SC2034  # handed to menu_single by name
+    local -a d=("zip 7z tar tar.gz tar.bz2 tar.xz tar.zst squashfs gz xz zst"
+                "zip 7z rar tar gz bz2 xz zst lz4 lzma iso deb rpm cpio ar cab squashfs"
+                "")
+    while :; do
+        screen_begin "Main menu"
+        if ! menu_single "What do you want to do?" "Working folder: $(disp "$PWD")" l d 0; then return 0; fi
+        case $MENU_INDEX in
+            0) zip_flow ;;
+            1) unzip_flow ;;
+            2) return 0 ;;
+        esac
+    done
+}
+
+main() {
+    local tmpbase rc i
+    case ${0##*/} in larc) INVOKED_AS=larc ;; *) INVOKED_AS=linux-archive ;; esac
+    setup_locale
+    cli_parse "$@"; rc=$?
+    (( rc == 3 )) || return "$rc"
+    if ! check_gnu; then
+        printf 'linux-archive: required tools are missing or are not the GNU versions:\n' >&2
+        printf '   - %s\n' "${GNU_MISSING[@]}" >&2
+        printf 'Install them with:  sudo ./install.sh   (details: linux-archive --check)\n' >&2
+        exit 1
+    fi
+    # Private scratch directory (mode 0700 by mktemp).  An unusable TMPDIR
+    # (relative, missing, not a directory) falls back to /tmp.
+    tmpbase=${TMPDIR:-/tmp}
+    [[ $tmpbase == /* && -d $tmpbase && -w $tmpbase ]] || tmpbase=/tmp
+    WORKDIR=$(umask 077 && mktemp -d "$tmpbase/linux-archive.XXXXXX") || { echo "linux-archive: cannot create a private temp folder" >&2; exit 1; }
+    trap cleanup EXIT
+    trap 'on_signal INT 130' INT
+    trap 'on_signal TERM 143' TERM
+    trap 'on_signal HUP 129' HUP
+    trap on_winch WINCH
+    find_7z || true
+    find_unrar
+    ui_init
+    if (( EUID == 0 )); then
+        defer_warn "Running as ROOT: extracted files are owned by root and archive contents are"
+        defer_warn "handled with full privileges. Prefer running linux-archive as a normal user."
+    fi
+    if ! have file; then
+        defer_warn "The 'file' tool is missing (needed to detect archives) - run:  sudo ./install.sh"
+    fi
+    case $CLI_OP in
+        zip) zip_flow; return $? ;;
+        unzip)
+            if (( ${#CLI_ITEMS[@]} )); then
+                u_scan "${CLI_ITEMS[@]#./}"
+                if (( ${#U_NAMES[@]} != ${#CLI_ITEMS[@]} )); then
+                    cli_error "every archive argument must be a supported regular archive (checked by content)"
+                    return 2
+                fi
+                rc=0
+                for (( i = 0; i < ${#U_NAMES[@]}; i++ )); do
+                    A_FILE="./${U_NAMES[i]}" A_REAL=${U_TYPES[i]}
+                    unzip_flow || rc=1
+                done
+                return "$rc"
+            fi
+            unzip_flow; return $? ;;
+        *) main_menu ;;
+    esac
+    printf '%sBye!%s\n' "$C_ACC" "$C_RST"
+}
+
+# Leave explicitly with main's status: nothing after this line may ever run
+# (the exit status of --verify, --help and usage errors must not be replaced by
+# whatever follows).
+main "$@"
+exit "$?"

@@ -2650,3 +2650,55 @@ unzip_flow() {
 }
 
 # ===================================================================== main
+usage() {
+    cat <<USAGE
+$INVOKED_AS $LA_VERSION - terminal archive helper (works on the current folder)
+
+Usage: $INVOKED_AS [--plain] [--no-color] [zip|unzip|FORMAT [--] ITEM...]
+       $INVOKED_AS [--check|--verify|--help|--version]
+
+  zip          create an archive; select items and then a format
+  unzip        extract one or more archives (detected by content)
+  FORMAT       create directly as: 7z tar tar.gz (tgz) tar.bz2 tar.xz
+               tar.zst squashfs gz xz zst (last three require one regular file)
+  ITEM         an entry in the current directory (./name is also accepted);
+               use -- before a name starting with a dash
+  --plain      numbered menus instead of arrow-key menus (also automatic when
+               the terminal cannot do cursor control)
+  --no-color   no ANSI colours (also honoured: NO_COLOR environment variable)
+  --check      show which helper tools are installed / missing
+  --verify     check the system-wide installation against setup.sh's manifest
+  --help, -h   this text            --version, -V   print the version
+
+With no arguments, the full Zip/Unzip menu opens. Items supplied on the command
+line skip the item picker; a format subcommand also skips the format picker.
+Compression level, optional hidden password (zip/7z), destination and overwrite
+policy are still prompted for. Passwords are never read from argv or environment.
+USAGE
+}
+
+cli_error() {
+    printf '%s: %s\n' "$INVOKED_AS" "$1" >&2
+    usage >&2
+    return 2
+}
+
+# Accept only entries the picker can reach: immediate children of the current
+# directory, not absolute paths or paths traversing a parent directory.
+cli_item() {
+    local n=$1
+    [[ $n == ./* ]] && n=${n#./}
+    if [[ -z $n || $n == . || $n == .. || $n == */* ]]; then
+        cli_error "invalid item path '$(disp "$1")' (use a current-directory entry)"
+        return 2
+    fi
+    if is_scratch_name "$n"; then
+        cli_error "'$(disp "$n")' is an internal scratch name (.linux-archive.*), not a selectable item"
+        return 2
+    fi
+    if ! path_exists "./$n"; then
+        cli_error "item does not exist: '$(disp "$n")'"
+        return 2
+    fi
+    CLI_ITEMS+=("./$n")
+}

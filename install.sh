@@ -253,3 +253,55 @@ tool_runs() {
 }
 
 REQUIRED_TOOLS="bash gnutar gnucoreutils gnufind grep setsid flock tput file 7z zip unzip gzip bzip2 xz zstd lz4 mksquashfs cabextract rpm2cpio cpio ar dpkg-deb bsdtar"
+
+# pkgs_for TOOL: candidate packages, best first ("a+b" = install both).
+# Package names were verified with each distribution's package manager.
+pkgs_for() {
+    case $FAMILY:$1 in
+        *:bash) echo bash ;;
+        *:gnutar) echo tar ;;
+        alpine:gnucoreutils|*:gnucoreutils) echo coreutils ;;
+        *:gnufind) echo findutils ;;
+        *:grep) echo grep ;;
+        alpine:flock) echo flock ;;
+        alpine:setsid) echo util-linux-misc ;;
+        *:setsid|*:flock) echo util-linux ;;
+        debian:tput) echo ncurses-bin ;;
+        suse:tput) echo ncurses-utils ;;
+        *:tput) echo ncurses ;;
+        *:file) echo file ;;
+        debian:7z) echo 7zip p7zip-full ;;
+        el:7z) echo 7zip p7zip+p7zip-plugins ;;
+        fedora:7z) echo 7zip p7zip+p7zip-plugins ;;
+        suse:7z) echo 7zip p7zip-full ;;
+        *:7z) echo 7zip ;;
+        *:zip) echo zip ;;
+        *:unzip) echo unzip ;;
+        *:gzip) echo gzip ;;
+        *:bzip2) echo bzip2 ;;
+        debian:xz) echo xz-utils ;;
+        *:xz) echo xz ;;
+        *:zstd) echo zstd ;;
+        *:lz4) echo lz4 ;;
+        suse:mksquashfs) echo squashfs ;;
+        *:mksquashfs) echo squashfs-tools ;;
+        *:cabextract) echo cabextract ;;
+        debian:rpm2cpio) echo rpm2cpio rpm ;;
+        alpine:rpm2cpio) echo rpm2cpio ;;
+        arch:rpm2cpio) echo rpm-tools ;;
+        *:rpm2cpio) echo rpm ;;
+        *:cpio) echo cpio ;;
+        *:ar) echo binutils ;;
+        *:dpkg-deb) echo dpkg ;;
+        debian:bsdtar|alpine:bsdtar) echo libarchive-tools ;;
+        arch:bsdtar) echo libarchive ;;
+        *:bsdtar) echo bsdtar ;;
+        *) echo "" ;;
+    esac
+}
+
+# ----------------------------------------------------- package manager glue
+LOG=$(mktemp "${TMPDIR:-/tmp}/linux-archive-install.XXXXXX") || { err "cannot create a temp file"; exit 1; }
+trap 'rm -f -- "$LOG"' EXIT
+trap 'rm -f -- "$LOG"; exit 130' INT
+trap 'rm -f -- "$LOG"; exit 143' TERM

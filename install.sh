@@ -493,3 +493,85 @@ fi
 for p in $BEFORE_MISSING; do
     if [ "$DRY" -eq 1 ] || pkg_installed "$p"; then record_new "$p"; fi
 done
+
+# ------------------------------------------------------------------- RAR
+# The real RAR extractor (unrar by RARLAB) has a NON-FREE licence.  Free
+# alternatives: 7-Zip builds that include the RAR decoder (Arch), and unar
+# (The Unarchiver; extracts RAR4/RAR5 but takes passwords only on argv, so
+# linux-archive uses it for unencrypted RAR archives only).
+RAR_RESULT=""
+real_unrar() {
+    for ru_c in unrar unrar-nonfree; do
+        have "$ru_c" || continue
+        "$ru_c" 2>&1 </dev/null | head -n 3 | grep -q 'UNRAR' && return 0
+    done
+    return 1
+}
+sevenzip_has_rar() {
+    for sr_b in 7zz 7z 7za; do
+        have "$sr_b" || continue
+        "$sr_b" i 2>/dev/null | sed -n '/^Codecs:/,/^Hashers:/p' | grep -q ' Rar5$' && return 0
+    done
+    return 1
+}
+
+# Debian/Ubuntu: write a deb822 source for COMPONENT that copies URIs, Suites
+# and Signed-By of the system's own entries for this release (apt refuses two
+# entries for the same archive with different Signed-By values).
+APT_ADDED=""
+apt_add_component() {   # apt_add_component COMPONENT FILE
+    aac_comp=$1 aac_file=$2
+    if [ -z "$OS_CODENAME" ]; then warn "unknown release codename - cannot add the '$aac_comp' component."; return 1; fi
+    aac_tmp=$(mktemp "${TMPDIR:-/tmp}/linux-archive-src.XXXXXX") || return 1
+    {
+        printf '# Added by linux-archive install.sh (component "%s" for the real unrar).\n' "$aac_comp"
+        printf '# Remove this file and run "apt-get update" to undo.\n'
+        for f in /etc/apt/sources.list.d/*.sources; do
+            [ -r "$f" ] || continue
+            awk -v code="$OS_CODENAME" -v comp="$aac_comp" '
+                function flush() {
+                    if (types ~ /(^| )deb( |$)/ && enabled != "no" && uris != "" && suites != "") {
+                        n = split(suites, s, " "); keep = ""
+                        for (i = 1; i <= n; i++) if (s[i] == code || index(s[i], code "-") == 1) keep = keep (keep == "" ? "" : " ") s[i]
+                        if (keep != "") { printf "\nTypes: deb\nURIs: %s\nSuites: %s\nComponents: %s\n", uris, keep, comp
+                                          if (sb != "") printf "Signed-By: %s\n", sb }
+                    }
+                    types = uris = suites = sb = enabled = ""; cur = ""
+                }
+                /^[ \t]*$/ { flush(); next }
+                /^#/ { next }
+                /^[ \t]/ { if (cur == "sb") sb = sb "\n" $0; next }
+                { k = $0; sub(/:.*/, "", k); v = $0; sub(/^[^:]*:[ \t]*/, "", v); cur = ""
+                  if (k == "Types") types = v; else if (k == "URIs") uris = v; else if (k == "Suites") suites = v
+                  else if (k == "Enabled") enabled = v; else if (k == "Signed-By") { sb = v; cur = "sb" } }
+                END { flush() }' "$f"
+        done
+        if [ -r /etc/apt/sources.list ]; then
+            awk -v code="$OS_CODENAME" -v comp="$aac_comp" '
+                $1 == "deb" {
+                    i = 2; sb = ""
+                    if ($2 ~ /^\[/) { while (i <= NF) { o = $i; if (o ~ /^\[?signed-by=/) { sb = o; sub(/^\[?signed-by=/, "", sb); sub(/\]$/, "", sb) }
+                                                         i++; if (o ~ /\]$/) break } }
+                    uri = $i; suite = $(i + 1)
+                    if (suite == code || index(suite, code "-") == 1) {
+                        printf "\nTypes: deb\nURIs: %s\nSuites: %s\nComponents: %s\n", uri, suite, comp
+                        if (sb != "") printf "Signed-By: %s\n", sb
+                    }
+                }' /etc/apt/sources.list
+        fi
+    } >"$aac_tmp"
+    if ! grep -q '^URIs:' "$aac_tmp"; then
+        rm -f -- "$aac_tmp"; warn "no apt entries for '$OS_CODENAME' found to extend."; return 1
+    fi
+    info "Adding $aac_file (component '$aac_comp' of the system's own mirrors)."
+    if [ "$DRY" -eq 1 ]; then sed 's/^/    | /' "$aac_tmp"; rm -f -- "$aac_tmp"; return 0; fi
+    if ! { chmod 0644 "$aac_tmp" && mv -f -- "$aac_tmp" "$aac_file"; }; then rm -f -- "$aac_tmp"; return 1; fi
+    APT_ADDED=$aac_file
+    if ! apt-get -o DPkg::Lock::Timeout="$LOCK_TIMEOUT" update -qq; then
+        warn "apt rejected the added source - removing $aac_file again."
+        rm -f -- "$aac_file"; APT_ADDED=""
+        apt-get update -qq || true
+        return 1
+    fi
+    return 0
+}

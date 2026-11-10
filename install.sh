@@ -575,3 +575,127 @@ apt_add_component() {   # apt_add_component COMPONENT FILE
     fi
     return 0
 }
+
+# Fedora/RHEL: RPM Fusion (rpmfusion.org/Configuration).  Instead of the
+# documented "--nogpgcheck", the release packages are verified with the RPM
+# Fusion keys shipped in the distribution's own signed package
+# distribution-gpg-keys (Fedora repo / EPEL).
+rpmfusion_enable() {
+    if rpm -q rpmfusion-nonfree-release >/dev/null 2>&1; then return 0; fi
+    if [ "$FAMILY" = fedora ]; then rf_kind=fedora rf_ver=$(rpm -E %fedora); else rf_kind=el rf_ver=$(rpm -E %rhel); fi
+    case $rf_ver in ''|*[!0-9]*) warn "cannot determine the release number for RPM Fusion."; return 1 ;; *) ;; esac
+    pkg_installed distribution-gpg-keys || { pm_install distribution-gpg-keys || return 1; record_new distribution-gpg-keys; }
+    for t in free nonfree; do
+        rf_key=/usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-$t-$rf_kind-$rf_ver
+        if [ "$DRY" -eq 0 ] && [ ! -r "$rf_key" ]; then warn "missing $rf_key - refusing to add RPM Fusion without a verified key."; return 1; fi
+        run rpmkeys --import "$rf_key" || return 1
+    done
+    run dnf -y --setopt=localpkg_gpgcheck=1 install \
+        "https://mirrors.rpmfusion.org/free/$rf_kind/rpmfusion-free-release-$rf_ver.noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/$rf_kind/rpmfusion-nonfree-release-$rf_ver.noarch.rpm" || return 1
+    record_new rpmfusion-free-release; record_new rpmfusion-nonfree-release
+    return 0
+}
+
+# openSUSE: the official non-oss repository (download.opensuse.org).  It is
+# signed with the same openSUSE key as the main repository, so no new key is
+# imported (zypper refuses an unknown key in non-interactive mode).
+SN_ADDED="" SN_ENABLED=""
+suse_enable_nonoss() {
+    sn_alias=$(zypper -n -q lr -u 2>/dev/null | awk -F'|' 'tolower($0) ~ /non-oss/ && tolower($0) !~ /debug|source/ { gsub(/ /, "", $2); print $2; exit }')
+    if [ -n "$sn_alias" ]; then
+        run zypper -n modifyrepo --enable "$sn_alias" >/dev/null || return 1
+        SN_ENABLED=$sn_alias
+        run zypper -n -q refresh "$sn_alias"
+        return $?
+    fi
+    case $OS_ID in
+        opensuse-tumbleweed|opensuse-slowroll) sn_url=https://download.opensuse.org/tumbleweed/repo/non-oss/ ;;
+        opensuse-leap) sn_url=https://download.opensuse.org/distribution/leap/$OS_VER/repo/non-oss/ ;;
+        *) warn "unknown openSUSE flavour '$OS_ID' - cannot add the non-oss repository."; return 1 ;;
+    esac
+    run zypper -n addrepo --refresh "$sn_url" linux-archive-non-oss || return 1
+    SN_ADDED=linux-archive-non-oss
+    run zypper -n -q refresh linux-archive-non-oss
+}
+
+# Undo a just-added RPM Fusion when its repositories do not work: a broken
+# repository makes every later dnf command fail (skip_if_unavailable=False).
+rpmfusion_rollback() {
+    case " $NEW_PKGS " in *" rpmfusion-nonfree-release "*) ;; *) return 0 ;; esac
+    warn "RPM Fusion did not work here (mirror/metadata error) - removing it again so dnf keeps working."
+    run rpm -e rpmfusion-nonfree-release rpmfusion-free-release >/dev/null 2>&1 || warn "could not remove the RPM Fusion release packages"
+    rr_keep=""
+    for rr_p in $NEW_PKGS; do
+        case $rr_p in rpmfusion-nonfree-release|rpmfusion-free-release) ;; *) rr_keep="$rr_keep $rr_p" ;; esac
+    done
+    NEW_PKGS=$rr_keep
+}
+
+nonfree_install_unrar() {
+    BEFORE_UNRAR=yes
+    pkg_installed unrar || BEFORE_UNRAR=no
+    case $FAMILY in
+        debian)
+            pm_refresh
+            if ! pkg_available unrar; then
+                if [ "$IS_UBUNTU" -eq 1 ]; then apt_add_component multiverse /etc/apt/sources.list.d/linux-archive-multiverse.sources || return 1
+                else apt_add_component non-free /etc/apt/sources.list.d/linux-archive-nonfree.sources || return 1; fi
+            fi ;;
+        fedora|el) [ "$FAMILY" = el ] && { EPEL=yes; ensure_epel || return 1; }
+                   rpmfusion_enable || { rpmfusion_rollback; return 1; }
+                   if ! pkg_installed unrar || ! real_unrar; then
+                       if ! pm_install unrar; then rpmfusion_rollback; return 1; fi
+                   fi
+                   if ! real_unrar; then
+                       # e.g. RPM Fusion EL10 builds need an x86-64-v3 CPU (AlmaLinux v2 hosts).
+                       warn "the installed 'unrar' does not run here: $(first_line unrar | cut -c1-100)"
+                       case " $BEFORE_UNRAR " in *" no "*) run rpm -e unrar >/dev/null 2>&1 ;; *) ;; esac
+                       rpmfusion_rollback
+                       return 1
+                   fi
+                   record_new unrar
+                   return 0 ;;
+        suse) if ! pkg_available unrar; then
+                  if ! suse_enable_nonoss; then
+                      [ -n "$SN_ADDED" ] && run zypper -n removerepo "$SN_ADDED" >/dev/null 2>&1
+                      [ -n "$SN_ENABLED" ] && run zypper -n modifyrepo --disable "$SN_ENABLED" >/dev/null 2>&1
+                      warn "the openSUSE non-oss repository could not be used - reverted."
+                      return 1
+                  fi
+              fi ;;
+        arch) pm_refresh ;;
+        alpine) warn "Alpine Linux does not package the non-free unrar."; return 1 ;;
+        *) return 1 ;;
+    esac
+    pkg_installed unrar && return 0
+    pm_install unrar || return 1
+    record_new unrar
+    return 0
+}
+
+# Free fallback: no extra package.  bsdtar (libarchive, installed above)
+# reads unencrypted RAR4 archives, and RAR5 since libarchive 3.4.  An
+# already installed unar / unrar-free is used by linux-archive as well.
+free_rar_fallback() {
+    if have unar && have lsar; then RAR_RESULT="unar (free; unencrypted RAR only)"; return 0; fi
+    if have unrar-free; then RAR_RESULT="unrar-free (free; no encrypted RAR)"; return 0; fi
+    if have bsdtar; then
+        fr_v=$(first_line bsdtar --version | sed -n 's/.*libarchive \([0-9][0-9.]*\).*/\1/p')
+        case $fr_v in
+            3.[0-3].*|[0-2].*)
+                # libarchive < 3.4 has no RAR5 reader (EL8): add the free unar if packaged.
+                pm_refresh
+                if pkg_available unar && pm_install unar; then
+                    record_new unar
+                    RAR_RESULT="unar installed (free; unencrypted RAR4/RAR5 - libarchive $fr_v has no RAR5)"
+                else
+                    RAR_RESULT="bsdtar (libarchive $fr_v): unencrypted RAR4 only - no RAR5, no encrypted RAR"
+                fi ;;
+            *) RAR_RESULT="bsdtar (libarchive ${fr_v:-?}): unencrypted RAR4/RAR5 - no encrypted RAR" ;;
+        esac
+        return 0
+    fi
+    RAR_RESULT="no RAR extractor available on this system"
+    return 1
+}

@@ -440,3 +440,56 @@ add_status() {   # add_status TOOL PACKAGE STATUS
 }
 
 ensure_epel || true
+
+MISSING_TOOLS=""
+for t in $REQUIRED_TOOLS; do
+    if tool_ok "$t"; then add_status "$t" "-" "already present"
+    else MISSING_TOOLS="$MISSING_TOOLS $t"; fi
+done
+
+if [ -n "$MISSING_TOOLS" ]; then
+    pm_refresh
+    for t in $MISSING_TOOLS; do
+        chosen=""
+        for cand in $(pkgs_for "$t"); do
+            allok=1
+            for p in $(printf '%s' "$cand" | tr '+' ' '); do
+                pkg_installed "$p" && continue
+                pkg_available "$p" || allok=0
+            done
+            if [ "$allok" -eq 1 ]; then chosen=$cand; break; fi
+        done
+        if [ -z "$chosen" ] && [ "$DRY" -eq 1 ]; then
+            # --dry-run never refreshes the metadata, so "not found" may only mean "not refreshed".
+            add_status "$t" "$(pkgs_for "$t" | cut -d' ' -f1)" "would be installed (if available)"
+            continue
+        fi
+        if [ -z "$chosen" ]; then
+            hint=""
+            [ "$FAMILY" = el ] && [ "$EPEL_STATE" != "enabled (with CRB/PowerTools)" ] && [ "$EPEL_STATE" != "already enabled" ] && hint=" (needs EPEL: --with-epel)"
+            add_status "$t" "$(pkgs_for "$t" | cut -d' ' -f1)" "UNAVAILABLE$hint"
+            continue
+        fi
+        for p in $(printf '%s' "$chosen" | tr '+' ' '); do
+            case " $TO_INSTALL " in *" $p "*) ;; *) TO_INSTALL="$TO_INSTALL $p" ;; esac
+        done
+        add_status "$t" "$chosen" "pending"
+    done
+fi
+
+# Packages not installed yet (before the run) -> recorded after success.
+BEFORE_MISSING=""
+for p in $TO_INSTALL; do pkg_installed "$p" || BEFORE_MISSING="$BEFORE_MISSING $p"; done
+
+PM_FAILED=0
+if [ -n "$TO_INSTALL" ]; then
+    info "Installing:$TO_INSTALL"
+    # shellcheck disable=SC2086  # word splitting of the package list is intended
+    if ! pm_install $TO_INSTALL; then
+        warn "Bulk installation failed; retrying package by package..."
+        for p in $TO_INSTALL; do pm_install "$p" >>"$LOG" 2>&1 || { warn "could not install $p"; PM_FAILED=1; }; done
+    fi
+fi
+for p in $BEFORE_MISSING; do
+    if [ "$DRY" -eq 1 ] || pkg_installed "$p"; then record_new "$p"; fi
+done

@@ -305,3 +305,90 @@ LOG=$(mktemp "${TMPDIR:-/tmp}/linux-archive-install.XXXXXX") || { err "cannot cr
 trap 'rm -f -- "$LOG"' EXIT
 trap 'rm -f -- "$LOG"; exit 130' INT
 trap 'rm -f -- "$LOG"; exit 143' TERM
+
+pkg_installed() {
+    case $PM in
+        apt) [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ] ;;
+        dnf|zypper) rpm -q "$1" >/dev/null 2>&1 ;;
+        pacman) pacman -Qq "$1" >/dev/null 2>&1 ;;
+        apk) apk info -e "$1" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+pkg_available() {
+    case $PM in
+        apt) pa_c=$(apt-cache policy "$1" 2>/dev/null | sed -n 's/^ *Candidate: //p' | head -n 1)
+             [ -n "$pa_c" ] && [ "$pa_c" != "(none)" ] ;;
+        dnf) [ -n "$(dnf -q repoquery --qf '%{name}\n' "$1" 2>/dev/null | head -n 1)" ] ;;
+        zypper) zypper -n -q search -x -t package -- "$1" >/dev/null 2>&1 ;;
+        pacman) pacman -Si "$1" >/dev/null 2>&1 ;;
+        apk) [ -n "$(apk search -e "$1" 2>/dev/null | head -n 1)" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# Wait (up to LOCK_TIMEOUT s) while another package manager run holds its lock.
+# apt and apk wait by themselves (apt -o DPkg::Lock::Timeout=N, apk --wait N;
+# their locks are fcntl locks that flock(1) cannot see); pacman, zypper and
+# dnf are checked through their lock / pid files.
+wait_for_pm_lock() {
+    [ "$DRY" -eq 1 ] && return 0
+    [ "$(id -u)" -eq 0 ] || return 0
+    wl_t=0
+    while :; do
+        wl_busy=""
+        case $PM in
+            pacman) [ -e /var/lib/pacman/db.lck ] && wl_busy=/var/lib/pacman/db.lck ;;
+            zypper) [ -s /run/zypp.pid ] && kill -0 "$(cat /run/zypp.pid 2>/dev/null)" 2>/dev/null && wl_busy=/run/zypp.pid ;;
+            dnf) for f in /var/cache/dnf/*.pid /var/lib/dnf/rpmdb_lock.pid /run/dnf/*.pid; do
+                     [ -s "$f" ] && kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null && wl_busy=$f
+                 done ;;
+            *) ;;
+        esac
+        [ -z "$wl_busy" ] && return 0
+        if [ "$wl_t" -ge "$LOCK_TIMEOUT" ]; then
+            err "The package manager is still busy after ${LOCK_TIMEOUT}s (lock: $wl_busy)."
+            return 1
+        fi
+        [ "$wl_t" -eq 0 ] && info "Waiting for another package manager run to finish ($wl_busy)..."
+        sleep 5
+        wl_t=$((wl_t + 5))
+    done
+}
+
+UPDATED=0
+pm_refresh() {
+    [ "$UPDATED" -eq 1 ] && return 0
+    UPDATED=1
+    [ "$DO_UPDATE" -eq 1 ] || return 0
+    wait_for_pm_lock || exit 6
+    info "Refreshing the package metadata..."
+    case $PM in
+        apt) run apt-get -o DPkg::Lock::Timeout="$LOCK_TIMEOUT" update -qq || warn "apt-get update failed - continuing with the existing package lists." ;;
+        dnf) run dnf -q -y makecache >/dev/null || warn "dnf makecache failed - continuing." ;;
+        zypper) ZYPP_LOCK_TIMEOUT=$LOCK_TIMEOUT run zypper -n -q refresh || warn "zypper refresh failed - continuing." ;;
+        pacman) if [ ! -s /var/lib/pacman/sync/core.db ]; then
+                    # Fresh system without sync databases: Arch supports only full
+                    # upgrades (-Syu), never partial ones (-Sy pkg) - wiki "Partial upgrades".
+                    run pacman -Syu --noconfirm || warn "pacman -Syu failed."
+                fi ;;
+        apk) run apk --wait "$LOCK_TIMEOUT" update -q || warn "apk update failed - continuing." ;;
+        *) ;;
+    esac
+}
+
+# pm_install PKG...: install, retrying once after waiting for a lock.
+pm_install() {
+    wait_for_pm_lock || exit 6
+    case $PM in
+        apt) DEBIAN_FRONTEND=noninteractive run apt-get -o DPkg::Lock::Timeout="$LOCK_TIMEOUT" install -y --no-install-recommends "$@" ;;
+        dnf) run dnf -y --setopt=install_weak_deps=False install "$@" ;;
+        zypper) ZYPP_LOCK_TIMEOUT=$LOCK_TIMEOUT run zypper -n install --no-recommends "$@" ;;
+        pacman) run pacman -S --needed --noconfirm "$@" ;;
+        apk) run apk --wait "$LOCK_TIMEOUT" add "$@" ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------- EPEL (RHEL family)

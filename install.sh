@@ -118,3 +118,86 @@ if [ "$(id -u)" -ne 0 ] && [ "$DRY" -eq 0 ]; then
 fi
 
 # run <command...>: execute, or only print it in --dry-run mode
+run() {
+    if [ "$DRY" -eq 1 ]; then printf '%s[dry-run]%s %s\n' "$C_ACC" "$C_RST" "$*"; return 0; fi
+    "$@"
+}
+
+# ------------------------------------------------------- system detection
+osr() {   # osr KEY: value from /etc/os-release (parsed, never sourced)
+    [ -r /etc/os-release ] || return 0
+    sed -n "s/^$1=//p" /etc/os-release | head -n 1 | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+OS_ID=$(osr ID) OS_LIKE=$(osr ID_LIKE) OS_VER=$(osr VERSION_ID) OS_NAME=$(osr PRETTY_NAME)
+OS_CODENAME=$(osr VERSION_CODENAME)
+[ -z "$OS_CODENAME" ] && OS_CODENAME=$(osr UBUNTU_CODENAME)
+OS_NAME=${OS_NAME:-unknown system}
+
+root_is_readonly() {
+    [ -r /proc/mounts ] || return 1
+    awk '$2 == "/" { n = split($4, o, ","); for (i = 1; i <= n; i++) if (o[i] == "ro") f = 1 } END { exit f ? 0 : 1 }' /proc/mounts
+}
+
+# Immutable / declarative systems: NixOS (ID=nixos), rpm-ostree / bootc images
+# (/run/ostree-booted, see rpm-ostree docs), transactional openSUSE/SUSE
+# (ID opensuse-microos/aeon/kalpa, sl-micro, or transactional-update + read-only /),
+# Ubuntu Core (ID=ubuntu-core), or simply a read-only /usr.
+immutable_reason() {
+    case " $OS_ID $OS_LIKE " in *" nixos "*) echo "NixOS - add the tools to configuration.nix instead"; return 0 ;; *) ;; esac
+    if [ -e /run/ostree-booted ]; then echo "an rpm-ostree/OSTree image-based system - use rpm-ostree or a toolbox container"; return 0; fi
+    case $OS_ID in
+        opensuse-microos|opensuse-aeon|opensuse-kalpa|sl-micro|suse-microos)
+            echo "a transactional openSUSE/SUSE system - use transactional-update"; return 0 ;;
+        ubuntu-core) echo "Ubuntu Core - snap based, read-only"; return 0 ;;
+        *) ;;
+    esac
+    if command -v transactional-update >/dev/null 2>&1 && root_is_readonly; then
+        echo "a transactional system with a read-only root - use transactional-update"; return 0
+    fi
+    if [ -d /usr ] && [ "$(id -u)" -eq 0 ] && [ ! -w /usr ]; then echo "a system whose /usr is read-only"; return 0; fi
+    return 1
+}
+if reason=$(immutable_reason); then
+    err "Refusing to install: $OS_NAME is $reason."
+    err "Nothing was changed."
+    exit 5
+fi
+
+FAMILY=unknown PM=""
+case " $OS_ID $OS_LIKE " in
+    *" alpine "*) FAMILY=alpine PM=apk ;;
+    *" arch "*) FAMILY=arch PM=pacman ;;
+    *suse*) FAMILY=suse PM=zypper ;;
+    *" debian "*|*" ubuntu "*) FAMILY=debian PM=apt ;;
+    *" fedora "*) if [ "$OS_ID" = fedora ]; then FAMILY=fedora; else FAMILY=el; fi; PM=dnf ;;
+    *" rhel "*|*" centos "*) FAMILY=el PM=dnf ;;
+    *) ;;
+esac
+case $OS_ID in rhel|rocky|almalinux|centos|ol|eurolinux|circle|navy) FAMILY=el PM=dnf ;; *) ;; esac
+IS_UBUNTU=0
+case " $OS_ID $OS_LIKE " in *" ubuntu "*) IS_UBUNTU=1 ;; *) ;; esac
+EL_MAJOR=${OS_VER%%.*}
+
+pm_binary_ok() {
+    case $PM in
+        apt) command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1 ;;
+        dnf) command -v dnf >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1 ;;
+        zypper) command -v zypper >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1 ;;
+        pacman) command -v pacman >/dev/null 2>&1 ;;
+        apk) command -v apk >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+REQUIRED_HELP="bash (>= 4.4), GNU tar, GNU coreutils, GNU findutils, util-linux (setsid, flock), ncurses (tput), file, 7-Zip, zip, unzip, gzip, bzip2, xz, zstd, lz4, squashfs-tools, cabextract, rpm2cpio, cpio, binutils (ar), dpkg (dpkg-deb), bsdtar (libarchive)"
+if [ "$FAMILY" = unknown ] || ! pm_binary_ok; then
+    err "Unsupported system: $OS_NAME (ID=$OS_ID, ID_LIKE=$OS_LIKE)."
+    err "Nothing was installed.  Install these tools with your package manager:"
+    err "  $REQUIRED_HELP"
+    exit 4
+fi
+IN_CONTAINER=no
+if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then IN_CONTAINER=yes; fi
+info "Detected: $OS_NAME  (family: $FAMILY, package manager: $PM, arch: $(uname -m), container: $IN_CONTAINER)"
+
+# ------------------------------------------------------------ tool checks

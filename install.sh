@@ -392,3 +392,51 @@ pm_install() {
 }
 
 # ---------------------------------------------------------- EPEL (RHEL family)
+EPEL_STATE="not needed"
+epel_enabled() { dnf -q repolist --enabled 2>/dev/null | grep -qi '^epel[[:space:]]'; }
+ensure_epel() {
+    [ "$FAMILY" = el ] || return 0
+    if epel_enabled; then EPEL_STATE="already enabled"; return 0; fi
+    if [ "$EPEL" = ask ]; then
+        if [ -t 0 ]; then
+            say ""
+            say "${C_B}EPEL${C_RST}: 7-Zip, cabextract and dpkg are not in the base repositories of"
+            say "  $OS_NAME.  They come from EPEL (Extra Packages for Enterprise Linux, free"
+            say "  software by the Fedora Project, GPG-signed).  Enabling EPEL also enables the"
+            say "  distribution's CRB/PowerTools repository, as the EPEL documentation requires."
+            printf 'Enable EPEL now? [y/N] '
+            read -r ee_ans || ee_ans=""
+            case $ee_ans in [yY]*) EPEL=yes ;; *) EPEL=no ;; esac
+        else
+            EPEL=no
+        fi
+    fi
+    if [ "$EPEL" != yes ]; then
+        EPEL_STATE="not enabled (re-run with --with-epel for 7-Zip, cabextract, dpkg)"
+        return 0
+    fi
+    pm_refresh
+    # epel-release comes from the distribution's own signed "extras" repository.
+    if ! pkg_installed epel-release; then
+        pm_install epel-release dnf-plugins-core || { EPEL_STATE="FAILED to install epel-release"; return 1; }
+        record_new epel-release
+    fi
+    case $EL_MAJOR in
+        8) run dnf config-manager --set-enabled powertools >/dev/null 2>&1 || run dnf config-manager --set-enabled PowerTools >/dev/null 2>&1 || warn "could not enable PowerTools" ;;
+        *) run dnf config-manager --set-enabled crb >/dev/null 2>&1 || warn "could not enable CRB" ;;
+    esac
+    run dnf -q -y makecache >/dev/null 2>&1 || true
+    EPEL_STATE="enabled (with CRB/PowerTools)"
+}
+
+# ------------------------------------------------------ install required set
+NEW_PKGS=""          # packages this run installed (recorded for uninstall)
+record_new() { case " $NEW_PKGS " in *" $1 "*) ;; *) NEW_PKGS="$NEW_PKGS $1" ;; esac; }
+
+TO_INSTALL="" STATUS_LINES=""
+add_status() {   # add_status TOOL PACKAGE STATUS
+    STATUS_LINES="$STATUS_LINES$(printf '%s|%s|%s' "$1" "$2" "$3")
+"
+}
+
+ensure_epel || true

@@ -201,3 +201,55 @@ if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then IN_CONTAINER=yes; fi
 info "Detected: $OS_NAME  (family: $FAMILY, package manager: $PM, arch: $(uname -m), container: $IN_CONTAINER)"
 
 # ------------------------------------------------------------ tool checks
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# first_line CMD...: first output line of a command (stderr included)
+first_line() { "$@" 2>&1 </dev/null | head -n 1; }
+
+# tool_ok TOOL: is the tool usable as linux-archive needs it?  BusyBox
+# applets (Alpine) lack options linux-archive uses (cpio -D, flock -w,
+# unzip -tq, xz compression ...), so the real implementations are required.
+tool_ok() {
+    case $1 in
+        7z) have 7zz || have 7z || have 7za ;;
+        gnutar) have tar && case $(first_line tar --version) in *"GNU tar"*) true ;; *) false ;; esac ;;
+        grep) have grep && case $(first_line grep --version) in *GNU*) true ;; *) false ;; esac ;;
+        # BusyBox answers "gzip: unrecognized option" - GNU gzip prints "gzip 1.x".
+        gzip) have gzip && gzip --version >/dev/null 2>&1 && case $(first_line gzip --version) in "gzip "[0-9]*) true ;; *) false ;; esac ;;
+        cpio) have cpio && case $(first_line cpio --version) in *"GNU cpio"*) true ;; *) false ;; esac ;;
+        bzip2) have bzip2 && case $(first_line bzip2 --help) in *"block-sorting"*) true ;; *) false ;; esac ;;
+        unzip) have unzip && case $(first_line unzip -v) in UnZip*) true ;; *) false ;; esac ;;
+        xz) have xz && case $(first_line xz --version) in *"XZ Utils"*) true ;; *) false ;; esac ;;
+        gnucoreutils) have realpath && realpath -m -- /x/../y >/dev/null 2>&1 \
+                      && mv --help 2>&1 | grep -q -- '--no-target-directory' \
+                      && have timeout && have sha256sum && stat -c %s -- / >/dev/null 2>&1 ;;
+        gnufind) have find && find / -maxdepth 0 -printf '' >/dev/null 2>&1 ;;
+        setsid) have setsid ;;
+        flock) have flock && case $(first_line flock --version) in *util-linux*) true ;; *) false ;; esac ;;
+        mksquashfs) have mksquashfs && have unsquashfs ;;
+        *) have "$1" ;;
+    esac
+}
+
+# Harmless invocation proving the tool really runs (after installation).
+tool_runs() {
+    case $1 in
+        7z) for b in 7zz 7z 7za; do if have "$b"; then "$b" i >/dev/null 2>&1 && return 0; fi; done; return 1 ;;
+        bash) bash -c 'exit $(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ? 0 : 1 ))' ;;
+        zip) zip -v >/dev/null 2>&1 ;;
+        unzip) unzip -v >/dev/null 2>&1 ;;
+        gnutar) tar --version >/dev/null 2>&1 ;;
+        gzip|xz|zstd|cpio|file|bsdtar|dpkg-deb|ar|grep|flock) "$1" --version >/dev/null 2>&1 ;;
+        bzip2) bzip2 --help >/dev/null 2>&1 ;;
+        lz4) lz4 -V >/dev/null 2>&1 ;;
+        mksquashfs) mksquashfs -version >/dev/null 2>&1 ;;
+        cabextract) cabextract --version >/dev/null 2>&1 ;;
+        rpm2cpio) [ -x "$(command -v rpm2cpio)" ] ;;
+        setsid) setsid true >/dev/null 2>&1 ;;
+        tput) tput -V >/dev/null 2>&1 ;;
+        gnucoreutils|gnufind) tool_ok "$1" ;;
+        *) tool_ok "$1" ;;
+    esac
+}
+
+REQUIRED_TOOLS="bash gnutar gnucoreutils gnufind grep setsid flock tput file 7z zip unzip gzip bzip2 xz zstd lz4 mksquashfs cabextract rpm2cpio cpio ar dpkg-deb bsdtar"

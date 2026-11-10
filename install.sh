@@ -699,3 +699,100 @@ free_rar_fallback() {
     RAR_RESULT="no RAR extractor available on this system"
     return 1
 }
+
+handle_rar() {
+    if real_unrar; then RAR_RESULT="unrar (real RAR tool) already installed"; return 0; fi
+    if sevenzip_has_rar; then RAR_RESULT="7-Zip includes the RAR decoder (RAR4/RAR5, encrypted RAR) - nothing else needed"; return 0; fi
+    if [ "$NONFREE" = ask ]; then
+        if [ -t 0 ]; then
+            say ""
+            say "${C_B}RAR support${C_RST}"
+            say "  The real RAR extractor 'unrar' (RARLAB) is NON-FREE software."
+            case $FAMILY in
+                debian) if [ "$IS_UBUNTU" -eq 1 ]; then say "  It comes from Ubuntu's 'multiverse' component (added if not enabled yet)."
+                        else say "  It comes from Debian's 'non-free' component (added if not enabled yet)."; fi ;;
+                fedora|el) say "  It comes from the RPM Fusion 'nonfree' repository (it will be added)." ;;
+                suse) say "  It comes from openSUSE's 'non-oss' repository (enabled if needed)." ;;
+                arch) say "  It is in Arch's official [extra] repository." ;;
+                alpine) say "  Alpine does not package it." ;;
+                *) ;;
+            esac
+            say "  Without it, the free libarchive (bsdtar) extracts RAR archives, but NOT encrypted ones."
+            printf 'Install the non-free unrar? [y/N] '
+            read -r hr_ans || hr_ans=""
+            case $hr_ans in [yY]*) NONFREE=yes ;; *) NONFREE=no ;; esac
+        else
+            NONFREE=no
+        fi
+    fi
+    if [ "$NONFREE" = yes ]; then
+        if nonfree_install_unrar; then RAR_RESULT="unrar (non-free) installed"; return 0; fi
+        warn "The non-free unrar could not be installed - using the free fallback."
+    else
+        info "Non-free software is not installed (use --with-nonfree for the real unrar)."
+    fi
+    free_rar_fallback || true
+}
+handle_rar
+
+# ---------------------------------------------------------- record + verify
+if [ -n "$NEW_PKGS" ] && [ "$DRY" -eq 0 ]; then
+    mkdir -p -- "$STATE_DIR" && chmod 0755 -- "$STATE_DIR"
+    if [ -L "$PKG_RECORD" ] || [ -L "$STATE_DIR" ]; then
+        warn "$PKG_RECORD is a symlink - not recording installed packages."
+    else
+        for p in $NEW_PKGS; do printf '%s\n' "$p"; done | cat -- - "$PKG_RECORD" 2>/dev/null | sort -u >"$PKG_RECORD.tmp" \
+            && chmod 0644 "$PKG_RECORD.tmp" && mv -f -- "$PKG_RECORD.tmp" "$PKG_RECORD"
+    fi
+fi
+
+say ""
+say "${C_B}Summary${C_RST}  ($OS_NAME, $PM)"
+printf '  %-14s %-26s %s\n' "TOOL" "PACKAGE" "STATUS"
+FAILED=0
+printf '%s' "$STATUS_LINES" | while IFS='|' read -r t p s; do
+    [ -n "$t" ] || continue
+    if [ "$s" = pending ]; then
+        if [ "$DRY" -eq 1 ]; then s="would be installed"
+        elif tool_ok "$t" && tool_runs "$t"; then s="installed now"
+        else s="FAILED"; fi
+    elif [ "$s" = "already present" ] && [ "$DRY" -eq 0 ] && ! tool_runs "$t"; then
+        s="present but does NOT run"
+    fi
+    case $s in
+        FAILED*|UNAVAILABLE*|*NOT*) col=$C_ERR ;;
+        "installed now"|"would be installed") col=$C_OK ;;
+        *) col=$C_ACC ;;
+    esac
+    printf '  %-14s %-26s %s%s%s\n' "$t" "$p" "$col" "$s" "$C_RST"
+done
+printf '  %-14s %-26s %s\n' "RAR" "-" "$RAR_RESULT"
+[ "$FAMILY" = el ] && printf '  %-14s %-26s %s\n' "EPEL" "-" "$EPEL_STATE"
+[ -n "$APT_ADDED" ] && info "Added apt source: $APT_ADDED (delete it + apt-get update to undo)."
+say ""
+
+if [ "$DRY" -eq 1 ]; then
+    info "Dry run: nothing was changed."
+    exit 0
+fi
+for t in $REQUIRED_TOOLS; do
+    if ! tool_ok "$t" || ! tool_runs "$t"; then FAILED=1; err "required tool not usable: $t"; fi
+done
+[ "$PM_FAILED" -eq 1 ] && FAILED=1
+if [ "$FAILED" -eq 1 ]; then
+    err "Some required tools are missing - see the summary above."
+    [ "$FAMILY" = el ] && [ "$EPEL" != yes ] && info "On $OS_NAME most of them come from EPEL:  sudo ./install.sh --with-epel"
+    exit 1
+fi
+ok "All required tools are installed and working."
+[ -n "$NEW_PKGS" ] && info "Recorded the packages installed by this run in $PKG_RECORD."
+if [ "$WITH_SETUP" -eq 1 ]; then
+    if [ -f "$SCRIPT_DIR/setup.sh" ]; then
+        info "Running setup.sh ..."
+        if [ "$ASSUME_YES" -eq 1 ]; then bash "$SCRIPT_DIR/setup.sh" --yes; else bash "$SCRIPT_DIR/setup.sh"; fi
+        exit $?
+    fi
+    err "setup.sh not found next to install.sh"; exit 1
+fi
+say "Next step:  sudo ./setup.sh   (installs the 'linux-archive' command)"
+exit 0

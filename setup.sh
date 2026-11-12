@@ -34,3 +34,48 @@
 #
 # The tool always works on the current directory of the terminal it is run in.
 set -uo pipefail
+
+# ------------------------------------------------- environment hardening
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+IFS=$' \t\n'
+unset -v BASH_ENV ENV CDPATH GLOBIGNORE 2>/dev/null
+export -n SHELLOPTS BASHOPTS 2>/dev/null
+umask 022
+export LC_ALL=C
+
+readonly INSTALL_DIR=/opt/linux-archive
+readonly INSTALL_BIN=$INSTALL_DIR/linux-archive.sh
+readonly LINK=/usr/local/bin/linux-archive
+readonly LARC_LINK=/usr/local/bin/larc
+readonly STATE_DIR=/var/lib/linux-archive
+readonly MANIFEST=$STATE_DIR/manifest
+readonly BEGIN_MARK='# BEGIN linux-archive (managed by setup.sh - do not edit)'
+readonly END_MARK='# END linux-archive'
+
+# ------------------------------------------------------------------ output
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && (( $(tput colors 2>/dev/null || echo 0) >= 8 )); then
+    C_RST=$(tput sgr0) C_OK=$(tput setaf 2) C_WARN=$(tput setaf 3) C_ERR=$(tput setaf 1) C_ACC=$(tput setaf 6)
+else
+    C_RST="" C_OK="" C_WARN="" C_ERR="" C_ACC=""
+fi
+info() { printf '%s[i]%s %s\n' "$C_ACC" "$C_RST" "$*"; }
+ok()   { printf '%s[ok]%s %s\n' "$C_OK" "$C_RST" "$*"; }
+warn() { printf '%s[!]%s %s\n' "$C_WARN" "$C_RST" "$*" >&2; }
+err()  { printf '%s[x]%s %s\n' "$C_ERR" "$C_RST" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+setup.sh - install linux-archive system-wide (must be run as root)
+
+  sudo ./setup.sh              install or update (safe to run repeatedly)
+  sudo ./setup.sh --yes        never ask
+  sudo ./setup.sh --verify     compare the installed files with the manifest
+  sudo ./setup.sh --uninstall  remove everything (delegates to uninstall_setup.sh;
+                               its options, e.g. --dry-run, are passed through)
+  ./setup.sh --help            this text
+
+Exit codes: 0 ok, 1 error, 2 usage, 3 not root, 5 immutable system, 6 busy (locked)
+USAGE
+}

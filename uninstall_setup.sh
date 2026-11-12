@@ -83,3 +83,60 @@ Exit codes: 0 ok (or nothing to remove), 1 error / refused, 2 usage,
             3 not root, 5 immutable system, 6 busy (another setup/uninstall runs)
 USAGE
 }
+
+DRY=0 ASSUME_YES=0 REMOVE_DEPS=0 KEEP_BACKUP=0
+for arg in "$@"; do
+    case $arg in
+        --dry-run|-n) DRY=1 ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        --remove-deps) REMOVE_DEPS=1 ;;
+        --keep-backup) KEEP_BACKUP=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) err "unknown option: $arg"; usage; exit 2 ;;
+    esac
+done
+
+# ------------------------------------------------------------------- root
+if [[ $EUID -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1 && [[ -t 0 ]]; then
+        info "Root is required - re-running with sudo..."
+        exec sudo -- bash "$(readlink -f -- "${BASH_SOURCE[0]}")" "$@"
+    fi
+    err "uninstall_setup.sh must be run as root:  sudo ./uninstall_setup.sh"
+    exit 3
+fi
+
+# ------------------------------------------------------- system detection
+osr() {   # osr KEY -> value from /etc/os-release (parsed, never sourced)
+    local line v=""
+    [[ -r /etc/os-release ]] || return 0
+    while IFS= read -r line; do
+        if [[ $line == "$1="* ]]; then v=${line#*=}; v=${v#[\"\']}; v=${v%[\"\']}; fi
+    done </etc/os-release
+    printf '%s' "$v"
+}
+root_is_readonly() {
+    local mnt opts
+    [[ -r /proc/mounts ]] || return 1
+    while read -r _ mnt _ opts _; do
+        if [[ $mnt == / ]]; then [[ ,$opts, == *,ro,* ]] && return 0; fi
+    done </proc/mounts
+    return 1
+}
+immutable_reason() {   # same rules as setup.sh (see the comment there)
+    local id like
+    id=$(osr ID) like=$(osr ID_LIKE)
+    if [[ $id == nixos || " $like " == *" nixos "* ]]; then echo "NixOS"; return 0; fi
+    if [[ -e /run/ostree-booted ]]; then echo "an rpm-ostree/OSTree image-based system"; return 0; fi
+    case $id in
+        opensuse-microos|opensuse-aeon|opensuse-kalpa|sl-micro|suse-microos) echo "a transactional openSUSE/SUSE system"; return 0 ;;
+        ubuntu-core) echo "Ubuntu Core"; return 0 ;;
+    esac
+    if command -v transactional-update >/dev/null 2>&1 && root_is_readonly; then echo "a transactional system with a read-only root"; return 0; fi
+    if [[ -d /usr && ! -w /usr ]]; then echo "a system whose /usr is read-only"; return 0; fi
+    return 1
+}
+if reason=$(immutable_reason); then
+    err "Refusing to run: this is $reason (setup.sh never installs there, so there is nothing to remove)."
+    exit 5
+fi

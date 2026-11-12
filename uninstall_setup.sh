@@ -301,3 +301,45 @@ if [[ -e $INSTALL_DIR || -L $INSTALL_DIR ]]; then
         FAILED=1
     fi
 fi
+
+# Packages recorded by install.sh
+DEPS=()
+if (( REMOVE_DEPS )); then
+    if [[ -f $PKG_RECORD && ! -L $PKG_RECORD && $(stat -c '%u' -- "$PKG_RECORD") == 0 ]]; then
+        while IFS= read -r p; do
+            [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9+._-]*$ ]] || continue
+            if [[ $PROTECTED_PKGS == *" $p "* ]]; then info "Keeping core package '$p' (protected)."; continue; fi
+            DEPS+=("$p")
+        done <"$PKG_RECORD"
+        (( ${#DEPS[@]} )) && ACTIONS+=("remove packages installed by install.sh: ${DEPS[*]}")
+    else
+        info "No package record from install.sh ($PKG_RECORD) - no packages to remove."
+    fi
+fi
+# The state directory counts as "installed by setup.sh" only through its manifest;
+# install.sh's package record alone is kept for a later --remove-deps.
+if (( HAVE_MANIFEST )); then FOUND=1; fi
+
+if (( ! FOUND )) && (( ${#DEPS[@]} == 0 )); then
+    info "Nothing to remove - linux-archive is not installed by setup.sh."
+    [[ -f $PKG_RECORD ]] && info "(install.sh's record of installed packages is kept: $PKG_RECORD - see --remove-deps)"
+    exit 0
+fi
+
+# --------------------------------------------------------------- confirm
+printf '\nPlanned actions:\n'
+for a in "${ACTIONS[@]}"; do printf '  - %s\n' "$a"; done
+(( HAVE_MANIFEST )) && printf '  - remove the manifest %s\n' "$MANIFEST"
+printf '\n'
+if (( DRY )); then
+    for a in "${ACTIONS[@]}"; do plan "$a"; done
+    info "Dry run: nothing was changed."
+    exit "$FAILED"
+fi
+if (( ! ASSUME_YES )); then
+    if [[ ! -t 0 ]]; then die "Not a terminal - re-run with --yes to confirm."; fi
+    read -r -p "Proceed? [y/N] " ans || exit 1
+    [[ $ans == [yY]* ]] || { info "Cancelled - nothing was changed."; exit 1; }
+fi
+
+take_lock

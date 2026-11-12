@@ -126,3 +126,33 @@ root_is_readonly() {   # / mounted read-only according to /proc/mounts?
     done </proc/mounts
     return 1
 }
+
+# Immutable / declarative systems manage /usr and /opt themselves; writing
+# there is either impossible or lost on the next update.  Detection:
+#   NixOS: ID=nixos (os-release(5)); rpm-ostree/bootc (Silverblue, Kinoite,
+#   CoreOS...): /run/ostree-booted (rpm-ostree docs, dnf PR #2053);
+#   transactional openSUSE (MicroOS, Aeon, Kalpa, SLE Micro): ID
+#   opensuse-microos/sl-micro, or transactional-update + read-only /;
+#   Ubuntu Core: ID=ubuntu-core.
+immutable_reason() {
+    local id like
+    id=$(osr ID) like=$(osr ID_LIKE)
+    if [[ $id == nixos || " $like " == *" nixos "* ]]; then echo "NixOS (declarative: add the tools to configuration.nix)"; return 0; fi
+    if [[ -e /run/ostree-booted ]]; then echo "an rpm-ostree/OSTree image-based system (use rpm-ostree / toolbox)"; return 0; fi
+    case $id in
+        opensuse-microos|opensuse-aeon|opensuse-kalpa|sl-micro|suse-microos)
+            echo "a transactional openSUSE/SUSE system (use transactional-update)"; return 0 ;;
+        ubuntu-core) echo "Ubuntu Core (snap-based, read-only)"; return 0 ;;
+    esac
+    if command -v transactional-update >/dev/null 2>&1 && root_is_readonly; then
+        echo "a transactional system with a read-only root (use transactional-update)"; return 0
+    fi
+    if [[ -d /usr && ! -w /usr ]]; then echo "a system whose /usr is read-only"; return 0; fi
+    return 1
+}
+
+if reason=$(immutable_reason); then
+    err "Refusing to install: this is $reason."
+    err "Nothing was changed.  linux-archive.sh itself still runs directly (./linux-archive.sh)."
+    exit 5
+fi

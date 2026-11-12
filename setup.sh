@@ -107,3 +107,22 @@ if [[ $EUID -ne 0 ]]; then
     err "Run:  sudo ./setup.sh"
     exit 3
 fi
+
+# ------------------------------------------------------- system detection
+osr() {   # osr KEY -> value from /etc/os-release (parsed, never sourced)
+    local line v=""
+    [[ -r /etc/os-release ]] || return 0
+    while IFS= read -r line; do
+        if [[ $line == "$1="* ]]; then v=${line#*=}; v=${v#[\"\']}; v=${v%[\"\']}; fi
+    done </etc/os-release
+    printf '%s' "$v"
+}
+
+root_is_readonly() {   # / mounted read-only according to /proc/mounts?
+    local mnt opts
+    [[ -r /proc/mounts ]] || return 1
+    while read -r _ mnt _ opts _; do
+        if [[ $mnt == / ]]; then [[ ,$opts, == *,ro,* ]] && return 0; fi
+    done </proc/mounts
+    return 1
+}

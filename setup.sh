@@ -186,3 +186,26 @@ pick_bashrc() {
             else echo /etc/bash.bashrc; fi ;;
     esac
 }
+
+# ---------------------------------------------------------------- locking
+# One setup/uninstall at a time.  The lock file lives in /run (root-only,
+# never world-writable, so it cannot be pre-created as a symlink by a user);
+# flock(1) -n fails at once instead of waiting.
+LOCK_FILE=""
+take_lock() {
+    local d
+    for d in /run /var/lib; do
+        if [[ -d $d && ! -L $d && $(stat -c '%u' -- "$d") == 0 && $(stat -c '%A' -- "$d") != ????????w? ]]; then
+            LOCK_FILE=$d/linux-archive-setup.lock
+            break
+        fi
+    done
+    [[ -n $LOCK_FILE ]] || die "no safe directory for the lock file (/run or /var/lib)."
+    command -v flock >/dev/null 2>&1 || die "flock (util-linux) is missing - run ./install.sh first."
+    [[ -L $LOCK_FILE ]] && die "$LOCK_FILE is a symlink - refusing to use it."
+    exec 9>>"$LOCK_FILE" || die "cannot open $LOCK_FILE"
+    if ! flock -n 9; then
+        err "Another setup.sh / uninstall_setup.sh is running (lock: $LOCK_FILE)."
+        exit 6
+    fi
+}

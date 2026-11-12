@@ -171,3 +171,18 @@ detect_family() {
     esac
 }
 detect_family
+
+# The system-wide interactive bash file for this family (verified per distro
+# in the test containers: it is what a new user's interactive bash reads).
+pick_bashrc() {
+    case $FAMILY in
+        suse) echo /etc/bash.bashrc.local ;;
+        fedora) echo /etc/bashrc ;;
+        alpine) echo /etc/bash/bashrc ;;
+        *)
+            if [[ -f /etc/bash.bashrc ]]; then echo /etc/bash.bashrc
+            elif [[ -f /etc/bashrc ]]; then echo /etc/bashrc
+            elif [[ -f /etc/bash/bashrc ]]; then echo /etc/bash/bashrc
+            else echo /etc/bash.bashrc; fi ;;
+    esac
+}

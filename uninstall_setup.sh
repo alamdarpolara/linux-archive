@@ -343,3 +343,97 @@ if (( ! ASSUME_YES )); then
 fi
 
 take_lock
+
+# ----------------------------------------------------------- 1. alias block
+for rc in "${RC_TARGETS[@]}"; do
+    created=0 nl=0
+    for i in "${!M_RC[@]}"; do
+        [[ ${M_RC[i]} == "$rc" ]] && { created=${M_RC_CREATED[i]}; nl=${M_RC_NL[i]}; }
+    done
+    if [[ -L $rc ]]; then warn "$rc is a symlink - not editing it."; FAILED=1; continue; fi
+    backup="$rc.linux-archive-uninstall.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -p -- "$rc" "$backup" || { err "cannot back up $rc - not touching it."; FAILED=1; continue; }
+    tmp=$(mktemp "$rc.la-XXXXXX") || { err "cannot create a temp file next to $rc"; FAILED=1; continue; }
+    strip_block "$rc" "$BEGIN_MARK" "$END_MARK" >"$tmp"
+    # setup.sh added a newline before the block when the file did not end
+    # with one: take it away again so the file is byte-identical to before.
+    if [[ $nl == 1 && -s $tmp ]]; then
+        truncate -s -1 -- "$tmp"
+    fi
+    if [[ $created == 1 && ! -s $tmp ]]; then
+        rm -f -- "$tmp" "$rc" && ok "Removed $rc (setup.sh had created it; it is empty now)."
+    elif replace_file "$tmp" "$rc"; then
+        ok "Alias block removed from $rc."
+    else
+        rm -f -- "$tmp"; err "could not update $rc (backup kept: $backup)"; FAILED=1; continue
+    fi
+    # Verify: no markers left, and the result equals the backup minus the block.
+    if [[ -e $rc ]] && grep -qF -- "$BEGIN_MARK" "$rc"; then
+        err "$rc still contains the block - backup kept: $backup"; FAILED=1
+    elif (( KEEP_BACKUP )); then
+        info "Backup kept: $backup"
+    else
+        rm -f -- "$backup"
+    fi
+done
+
+# --------------------------------------------------------------- 2. symlink
+if (( LINK_REMOVE )) && [[ -L $LINK && $(readlink -- "$LINK") == "$INSTALL_BIN" ]]; then
+    rm -f -- "$LINK" && ok "Removed symlink $LINK."
+fi
+
+# -------------------------------------------------------- 3. larc symlink
+if (( LARC_REMOVE )); then
+    if [[ -L $LARC_LINK && $(readlink -- "$LARC_LINK") == "$INSTALL_BIN" ]]; then
+        if rm -f -- "$LARC_LINK"; then ok "Removed manifest-owned symlink $LARC_LINK."
+        else err "Could not remove $LARC_LINK."; FAILED=1; fi
+    else
+        warn "$LARC_LINK changed before removal - left alone."
+    fi
+fi
+
+# ------------------------------------------------------------ 4. directory
+if (( DIR_OK )); then
+    if [[ -f $INSTALL_BIN && ! -L $INSTALL_BIN ]]; then rm -f -- "$INSTALL_BIN" && ok "Removed $INSTALL_BIN."; fi
+    if rmdir -- "$INSTALL_DIR" 2>/dev/null; then ok "Removed $INSTALL_DIR."
+    else err "$INSTALL_DIR is not empty after removing the script - left in place."; FAILED=1; fi
+fi
+
+# ------------------------------------------------------------- 5. packages
+pm_remove() {   # remove DEPS with the native package manager, refusing collateral removals
+    local -a ok_pkgs=() p
+    if command -v apt-get >/dev/null 2>&1; then
+        for p in "${DEPS[@]}"; do [[ $(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null) == installed ]] && ok_pkgs+=("$p"); done
+        (( ${#ok_pkgs[@]} )) || return 0
+        # Simulate first: abort if apt would remove anything else.
+        local extra
+        extra=$(apt-get -s remove "${ok_pkgs[@]}" 2>/dev/null | sed -n 's/^Remv \([^ ]*\).*/\1/p' | while read -r r; do
+            r=${r%%:*}; case " ${ok_pkgs[*]} " in *" $r "*) ;; *) printf '%s ' "$r" ;; esac; done)
+        if [[ -n $extra ]]; then err "apt would also remove: $extra- packages kept."; return 1; fi
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y "${ok_pkgs[@]}"
+    elif command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; then
+        for p in "${DEPS[@]}"; do rpm -q "$p" >/dev/null 2>&1 && ok_pkgs+=("$p"); done
+        (( ${#ok_pkgs[@]} )) || return 0
+        # rpm -e --test fails when another package still needs one of them.
+        if ! rpm -e --test "${ok_pkgs[@]}" >/dev/null 2>&1; then err "other packages depend on: ${ok_pkgs[*]} - packages kept."; return 1; fi
+        rpm -e "${ok_pkgs[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        for p in "${DEPS[@]}"; do pacman -Qq "$p" >/dev/null 2>&1 && ok_pkgs+=("$p"); done
+        (( ${#ok_pkgs[@]} )) || return 0
+        # Plain -R (no -c/-s) refuses when other packages depend on them.
+        pacman -R --noconfirm "${ok_pkgs[@]}"
+    elif command -v apk >/dev/null 2>&1; then
+        for p in "${DEPS[@]}"; do apk info -e "$p" >/dev/null 2>&1 && ok_pkgs+=("$p"); done
+        (( ${#ok_pkgs[@]} )) || return 0
+        # apk del only drops them from /etc/apk/world; packages still needed stay.
+        apk del "${ok_pkgs[@]}"
+    else
+        err "no supported package manager found"; return 1
+    fi
+}
+if (( ${#DEPS[@]} )); then
+    if pm_remove; then ok "Removed the packages that install.sh had installed."
+    else err "Package removal was refused or failed - see above."; FAILED=1; fi
+fi
+
+# ----------------------------------------------------- 6. state directory

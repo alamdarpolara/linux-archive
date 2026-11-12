@@ -140,3 +140,94 @@ if reason=$(immutable_reason); then
     err "Refusing to run: this is $reason (setup.sh never installs there, so there is nothing to remove)."
     exit 5
 fi
+
+# ---------------------------------------------------------------- locking
+LOCK_FILE=""
+take_lock() {
+    local d
+    for d in /run /var/lib; do
+        if [[ -d $d && ! -L $d && $(stat -c '%u' -- "$d") == 0 && $(stat -c '%A' -- "$d") != ????????w? ]]; then
+            LOCK_FILE=$d/linux-archive-setup.lock
+            break
+        fi
+    done
+    [[ -n $LOCK_FILE ]] || die "no safe directory for the lock file (/run or /var/lib)."
+    command -v flock >/dev/null 2>&1 || die "flock (util-linux) is missing."
+    [[ -L $LOCK_FILE ]] && die "$LOCK_FILE is a symlink - refusing to use it."
+    exec 9>>"$LOCK_FILE" || die "cannot open $LOCK_FILE"
+    if ! flock -n 9; then
+        err "Another setup.sh / uninstall_setup.sh is running (lock: $LOCK_FILE)."
+        exit 6
+    fi
+}
+
+# --------------------------------------------------------------- helpers
+sha256_of() { sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1; }
+
+strip_block() {   # strip_block <file> <begin> <end>
+    local line skip=0
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == "$2" ]]; then skip=1; continue; fi
+        if (( skip )); then [[ $line == "$3" ]] && skip=0; continue; fi
+        printf '%s\n' "$line"
+    done <"$1"
+}
+
+block_state() {   # none | ok | broken
+    local b e
+    [[ -f $1 ]] || { echo none; return; }
+    b=$(grep -cFx -- "$2" "$1")
+    e=$(grep -cFx -- "$3" "$1")
+    if (( b == 0 && e == 0 )); then echo none
+    elif (( b == 1 && e == 1 )); then echo ok
+    else echo broken; fi
+}
+
+replace_file() {   # replace_file <new-file> <target>: atomic, keeps owner/mode/label
+    chmod --reference="$2" -- "$1" || return 1
+    chown --reference="$2" -- "$1" || return 1
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled && command -v chcon >/dev/null 2>&1; then
+        chcon --reference="$2" -- "$1" 2>/dev/null || true
+    fi
+    mv -f -- "$1" "$2"
+}
+
+# ------------------------------------------------------- read the manifest
+M_DIR="" M_FILE="" M_SUM="" M_LINK="" M_LINK_TGT="" M_LOCK=""
+M_LARC="" M_LARC_TGT="" M_LARC_STATE="" M_LARC_SEEN=0
+M_RC=() M_RC_CREATED=() M_RC_NL=()
+HAVE_MANIFEST=0
+if [[ -f $MANIFEST && ! -L $MANIFEST ]]; then
+    [[ $(stat -c '%u' -- "$MANIFEST") == 0 ]] || die "$MANIFEST is not owned by root - refusing to trust it."
+    HAVE_MANIFEST=1
+    while IFS=$'\t' read -r kind p a b c; do
+        case $kind in
+            dir) M_DIR=$p ;;
+            file) M_FILE=$p M_SUM=$a ;;
+            symlink) M_LINK=$p M_LINK_TGT=$a ;;
+            larc)
+                (( M_LARC_SEEN == 0 )) || die "manifest has duplicate larc records - refusing."
+                M_LARC_SEEN=1 M_LARC=$p M_LARC_TGT=$a M_LARC_STATE=$b ;;
+            bashrc) M_RC+=("$p") M_RC_CREATED+=("${a:-0}") M_RC_NL+=("${b:-0}") ;;
+            lock) M_LOCK=$p ;;
+        esac
+        : "$c"
+    done <"$MANIFEST"
+    # The manifest may only name the fixed paths setup.sh uses.
+    [[ -z $M_DIR || $M_DIR == "$INSTALL_DIR" ]] || die "manifest names an unexpected directory ($M_DIR) - refusing."
+    [[ -z $M_FILE || $M_FILE == "$INSTALL_BIN" ]] || die "manifest names an unexpected file ($M_FILE) - refusing."
+    [[ -z $M_LINK || $M_LINK == "$LINK" ]] || die "manifest names an unexpected symlink ($M_LINK) - refusing."
+    [[ -z $M_LINK_TGT || $M_LINK_TGT == "$INSTALL_BIN" ]] || die "manifest names an unexpected symlink target - refusing."
+    if (( M_LARC_SEEN )); then
+        [[ $M_LARC == "$LARC_LINK" && $M_LARC_TGT == "$INSTALL_BIN" ]] ||
+            die "manifest names an unexpected larc path or target - refusing."
+        [[ $M_LARC_STATE == owned || $M_LARC_STATE == collision ]] ||
+            die "manifest has an invalid larc ownership decision - refusing."
+    fi
+    for p in "${M_RC[@]}"; do
+        case " ${RC_CANDIDATES[*]} " in *" $p "*) ;; *) die "manifest names an unexpected bash file ($p) - refusing." ;; esac
+    done
+    case $M_LOCK in ""|/run/linux-archive-setup.lock|/var/lib/linux-archive-setup.lock) ;; *) die "manifest names an unexpected lock file - refusing." ;; esac
+fi
+
+# --------------------------------------------------------- what is there?

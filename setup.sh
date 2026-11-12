@@ -79,3 +79,17 @@ setup.sh - install linux-archive system-wide (must be run as root)
 Exit codes: 0 ok, 1 error, 2 usage, 3 not root, 5 immutable system, 6 busy (locked)
 USAGE
 }
+
+# --------------------------------------------------------------- arguments
+MODE=install ASSUME_YES=0
+PASS_ARGS=()
+for arg in "$@"; do
+    if [[ $MODE == uninstall ]]; then PASS_ARGS+=("$arg"); continue; fi
+    case $arg in
+        --uninstall|-u) MODE=uninstall ;;
+        --verify) MODE=verify ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) err "unknown option: $arg"; usage; exit 2 ;;
+    esac
+done

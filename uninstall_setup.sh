@@ -437,3 +437,35 @@ if (( ${#DEPS[@]} )); then
 fi
 
 # ----------------------------------------------------- 6. state directory
+if [[ -d $STATE_DIR && ! -L $STATE_DIR ]]; then
+    keep_state=0
+    (( FAILED )) && keep_state=1
+    if (( ! keep_state )); then
+        for f in "$MANIFEST" "$PKG_RECORD"; do
+            if [[ $f == "$PKG_RECORD" && -f $f ]] && (( ! REMOVE_DEPS )); then
+                info "Keeping $PKG_RECORD (use --remove-deps to remove those packages)."
+                keep_state=1
+                continue
+            fi
+            [[ -f $f && ! -L $f ]] && rm -f -- "$f"
+        done
+        if (( ! keep_state )); then
+            if rmdir -- "$STATE_DIR" 2>/dev/null; then ok "Removed $STATE_DIR."
+            else warn "$STATE_DIR contains other files - left in place."; fi
+        fi
+    else
+        info "Keeping $STATE_DIR (manifest) because something could not be removed."
+    fi
+fi
+
+# ------------------------------------------------------------ 7. lock file
+if [[ -n $LOCK_FILE && -f $LOCK_FILE && ! -L $LOCK_FILE ]] && (( ! FAILED )); then
+    rm -f -- "$LOCK_FILE"
+fi
+
+if (( FAILED )); then
+    err "Uninstall finished with problems (see above)."
+    exit 1
+fi
+ok "linux-archive was uninstalled."
+exit 0

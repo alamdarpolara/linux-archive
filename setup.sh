@@ -156,3 +156,18 @@ if reason=$(immutable_reason); then
     err "Nothing was changed.  linux-archive.sh itself still runs directly (./linux-archive.sh)."
     exit 5
 fi
+
+FAMILY=""
+detect_family() {
+    local id like
+    id=$(osr ID) like=$(osr ID_LIKE)
+    case " $id $like " in
+        *" alpine "*) FAMILY=alpine ;;
+        *" arch "*) FAMILY=arch ;;
+        *suse*) FAMILY=suse ;;
+        *" debian "*|*" ubuntu "*) FAMILY=debian ;;
+        *" fedora "*|*" rhel "*|*" centos "*) FAMILY=fedora ;;
+        *) FAMILY=unknown ;;
+    esac
+}
+detect_family

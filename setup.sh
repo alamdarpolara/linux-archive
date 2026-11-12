@@ -93,3 +93,17 @@ for arg in "$@"; do
         *) err "unknown option: $arg"; usage; exit 2 ;;
     esac
 done
+
+SRC_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P) || die "cannot locate the source directory"
+
+if [[ $MODE == uninstall ]]; then
+    [[ -f $SRC_DIR/uninstall_setup.sh ]] || die "uninstall_setup.sh not found next to setup.sh ($SRC_DIR)."
+    (( ASSUME_YES )) && PASS_ARGS+=(--yes)
+    exec bash -- "$SRC_DIR/uninstall_setup.sh" "${PASS_ARGS[@]}"
+fi
+
+if [[ $EUID -ne 0 ]]; then
+    err "setup.sh must be run as root (it writes to /opt, /usr/local/bin, /var/lib and /etc)."
+    err "Run:  sudo ./setup.sh"
+    exit 3
+fi

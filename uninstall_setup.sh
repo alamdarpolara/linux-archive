@@ -231,3 +231,73 @@ if [[ -f $MANIFEST && ! -L $MANIFEST ]]; then
 fi
 
 # --------------------------------------------------------- what is there?
+ACTIONS=()          # human-readable plan
+FAILED=0
+FOUND=0
+RC_TARGETS=()       # bash files that contain our block
+for p in "${RC_CANDIDATES[@]}"; do
+    [[ -f $p ]] || continue
+    st=$(block_state "$p" "$BEGIN_MARK" "$END_MARK")
+    case $st in
+        ok) RC_TARGETS+=("$p"); ACTIONS+=("remove the linux-archive alias block from $p"); FOUND=1 ;;
+        broken) err "$p has unbalanced linux-archive markers - it will NOT be touched; remove the block by hand."; FAILED=1; FOUND=1 ;;
+    esac
+done
+LINK_REMOVE=0
+if [[ -L $LINK ]]; then
+    FOUND=1
+    if [[ $(readlink -- "$LINK") != "$INSTALL_BIN" ]]; then warn "$LINK points somewhere else ($(readlink -- "$LINK")) - it will be left alone."
+    elif (( HAVE_MANIFEST )) && [[ $M_LINK == "$LINK" ]]; then LINK_REMOVE=1; ACTIONS+=("remove the symlink $LINK")
+    else warn "$LINK is not recorded in the manifest - it will be left alone."; fi
+elif [[ -e $LINK ]]; then
+    warn "$LINK is not a symlink created by setup.sh - it will be left alone."
+fi
+
+# Never infer larc ownership from its name or even a matching target: it must
+# have an owned record in the manifest AND still point to our installed file.
+LARC_REMOVE=0
+if [[ $M_LARC_STATE == owned ]]; then
+    if [[ -L $LARC_LINK && $(readlink -- "$LARC_LINK") == "$INSTALL_BIN" ]]; then
+        LARC_REMOVE=1
+        ACTIONS+=("remove the manifest-owned symlink $LARC_LINK")
+    elif [[ -e $LARC_LINK || -L $LARC_LINK ]]; then
+        warn "$LARC_LINK no longer points to $INSTALL_BIN - foreign replacement left alone."
+    fi
+fi
+
+# /opt/linux-archive must match the manifest exactly.
+DIR_OK=0
+DIR_PROBLEMS=()
+if [[ -e $INSTALL_DIR || -L $INSTALL_DIR ]]; then
+    FOUND=1
+    if [[ -L $INSTALL_DIR ]]; then DIR_PROBLEMS+=("$INSTALL_DIR is a symbolic link")
+    elif [[ ! -d $INSTALL_DIR ]]; then DIR_PROBLEMS+=("$INSTALL_DIR is not a directory")
+    else
+        [[ $(stat -c '%u' -- "$INSTALL_DIR") == 0 ]] || DIR_PROBLEMS+=("$INSTALL_DIR is not owned by root")
+        while IFS= read -r -d '' e; do
+            if [[ $e != "$INSTALL_BIN" ]]; then DIR_PROBLEMS+=("unexpected entry: $(printf '%q' "$e")"); fi
+        done < <(find "$INSTALL_DIR" -mindepth 1 -print0 2>/dev/null)
+        if [[ -e $INSTALL_BIN || -L $INSTALL_BIN ]]; then
+            if [[ -L $INSTALL_BIN || ! -f $INSTALL_BIN ]]; then DIR_PROBLEMS+=("$INSTALL_BIN is not a regular file")
+            elif (( HAVE_MANIFEST )); then
+                # Never delete the script on a manifest without a usable digest.
+                if [[ ! $M_SUM =~ ^[0-9a-f]{64}$ ]]; then
+                    DIR_PROBLEMS+=("the manifest has no valid SHA-256 for $INSTALL_BIN - refusing to delete it")
+                elif [[ $(sha256_of "$INSTALL_BIN") != "$M_SUM" ]]; then
+                    DIR_PROBLEMS+=("$INSTALL_BIN was modified (SHA-256 differs from the manifest)")
+                fi
+            else
+                grep -q '^readonly LA_VERSION=' "$INSTALL_BIN" || DIR_PROBLEMS+=("$INSTALL_BIN is not the linux-archive script (no manifest to compare with)")
+            fi
+        fi
+    fi
+    if (( ${#DIR_PROBLEMS[@]} == 0 )); then
+        DIR_OK=1
+        [[ -e $INSTALL_BIN ]] && ACTIONS+=("delete $INSTALL_BIN")
+        ACTIONS+=("remove the directory $INSTALL_DIR")
+    else
+        err "$INSTALL_DIR does not match the manifest - NOTHING in it will be deleted:"
+        for e in "${DIR_PROBLEMS[@]}"; do err "   - $e"; done
+        FAILED=1
+    fi
+fi

@@ -522,3 +522,8 @@ do_verify() {
     ok "Installation verified."
     exit 0
 }
+
+case $MODE in
+    install) do_install ;;
+    verify) do_verify ;;
+esac

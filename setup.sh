@@ -466,3 +466,59 @@ do_install() {
     info "Open a NEW terminal and type:  linux-archive"
     info "It always works on the folder you are currently in."
 }
+
+# ----------------------------------------------------------------- verify
+do_verify() {
+    local kind path a b c bad=0 n=0 sum seen_dir=0 seen_file=0 seen_larc=0
+    [[ -r $MANIFEST ]] || { err "No manifest at $MANIFEST - linux-archive is not installed by setup.sh."; exit 1; }
+    while IFS=$'\t' read -r kind path a b c; do
+        case $kind in
+            dir)
+                n=$((n+1)); [[ $path == "$INSTALL_DIR" ]] && seen_dir=1
+                if [[ -d $path && ! -L $path && $(stat -c '%U:%G %a' -- "$path") == "$a $b" ]]; then ok "$path/ ($a $b)"
+                else err "$path/ changed (expected a $a $b directory)"; bad=1; fi ;;
+            file)
+                n=$((n+1)); [[ $path == "$INSTALL_BIN" ]] && seen_file=1
+                sum=$(sha256_of "$path")
+                if [[ ! $a =~ ^[0-9a-f]{64}$ ]]; then err "the manifest has no valid SHA-256 for $path"; bad=1
+                elif [[ -f $path && ! -L $path && $sum == "$a" && $(stat -c '%U:%G %a' -- "$path") == "$b $c" ]]; then ok "$path (sha256 matches, $b $c)"
+                else err "$path was MODIFIED (checksum, owner or mode differs)"; bad=1; fi ;;
+            symlink)
+                n=$((n+1))
+                if [[ -L $path && $(readlink -- "$path") == "$a" ]]; then ok "$path -> $a"
+                else err "$path is not the expected symlink to $a"; bad=1; fi ;;
+            larc)
+                seen_larc=1
+                if [[ $path != "$LARC_LINK" || $a != "$INSTALL_BIN" ]]; then
+                    err "Invalid larc manifest record: unexpected path or target"; bad=1
+                elif [[ $b == owned ]]; then
+                    n=$((n+1))
+                    if [[ -L $LARC_LINK && $(readlink -- "$LARC_LINK") == "$INSTALL_BIN" ]]; then
+                        ok "$LARC_LINK -> $INSTALL_BIN (owned)"
+                        if [[ $(command -v larc 2>/dev/null || true) != "$LARC_LINK" ]]; then
+                            err "larc resolves to a different command, not the owned $LARC_LINK"; bad=1
+                        fi
+                    else
+                        err "$LARC_LINK is not the manifest-owned symlink to $INSTALL_BIN"; bad=1
+                    fi
+                elif [[ $b == collision ]]; then
+                    info "Skipped larc: collision at install time ($c); foreign command not checked."
+                else
+                    err "Invalid larc manifest record: unexpected state $b"; bad=1
+                fi ;;
+            bashrc)
+                n=$((n+1))
+                if [[ $(block_state "$path" "$BEGIN_MARK" "$END_MARK") == ok ]]; then ok "alias block present in $path"
+                else err "alias block missing or damaged in $path"; bad=1; fi ;;
+        esac
+    done <"$MANIFEST"
+    (( n > 0 )) || { err "The manifest is empty."; exit 1; }
+    # Fail closed: the records every installation must have (a manifest that
+    # simply omits one would otherwise let a modified installation pass).
+    (( seen_dir )) || { err "the manifest has no record for $INSTALL_DIR"; bad=1; }
+    (( seen_file )) || { err "the manifest has no record for $INSTALL_BIN"; bad=1; }
+    (( seen_larc )) || { err "the manifest has no larc record (written by the current setup.sh)"; bad=1; }
+    if (( bad )); then err "VERIFY FAILED - re-run: sudo ./setup.sh"; exit 1; fi
+    ok "Installation verified."
+    exit 0
+}

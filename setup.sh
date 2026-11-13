@@ -242,3 +242,18 @@ replace_file() {   # replace_file <new-file> <target>
     fi
     mv -f -- "$1" "$2"
 }
+
+# Every directory from / down to <path> must be root-owned and not writable
+# by group/others - otherwise a local user could swap files under us.
+check_parents() {   # check_parents <path>
+    local p=$1 st perm
+    while [[ -n $p && $p != / ]]; do
+        p=$(dirname -- "$p")
+        [[ -e $p ]] || continue
+        st=$(stat -L -c '%u %A' -- "$p")
+        perm=${st#* }
+        if [[ ${st%% *} != 0 ]]; then die "$p is not owned by root - refusing to install below it."; fi
+        if [[ $perm == ????????w? ]]; then die "$p is writable by everybody - refusing to install below it."; fi
+        if [[ $perm == ?????w???? ]]; then die "$p is group-writable ($(stat -L -c '%G' -- "$p")) - refusing to install below it."; fi
+    done
+}

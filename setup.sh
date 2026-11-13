@@ -377,4 +377,92 @@ do_install() {
     mv -f -- "$tmp" "$INSTALL_BIN" || { rm -f -- "$tmp"; die "cannot install $INSTALL_BIN"; }
     cmp -s -- <(tail -n +2 -- "$src") <(tail -n +2 -- "$INSTALL_BIN") || die "the installed copy differs from the source (copy failed?)"
     ok "Installed $INSTALL_BIN (root:root 0755, interpreter $bashbin)."
+
+    if [[ -e $LINK && ! -L $LINK ]]; then
+        warn "$LINK exists and is not a symlink - leaving it alone (non-interactive shells will not find linux-archive)."
+        LINK_OK=0
+    else
+        mkdir -p -- "$(dirname -- "$LINK")"
+        ln -sfn -- "$INSTALL_BIN" "$LINK" && ok "Symlink $LINK -> $INSTALL_BIN"
+        LINK_OK=1
+    fi
+
+    # Both PATH resolution and the fixed destination must be free. An existing
+    # symlink to our script is still foreign unless a prior manifest owns it.
+    larc_command=$(command -v larc 2>/dev/null || true)
+    if (( larc_prior )) && [[ -L $LARC_LINK && $(readlink -- "$LARC_LINK") == "$INSTALL_BIN" ]] &&
+        [[ -z $larc_command || $larc_command == "$LARC_LINK" ]]; then
+        larc_state=owned
+        ok "Symlink $LARC_LINK -> $INSTALL_BIN is already owned."
+    elif [[ -n $larc_command || -e $LARC_LINK || -L $LARC_LINK ]]; then
+        larc_state=collision
+        larc_observed=${larc_command:-$LARC_LINK}
+        if (( larc_prior )) && [[ -L $LARC_LINK && $(readlink -- "$LARC_LINK") == "$INSTALL_BIN" ]]; then
+            # Our own, previously recorded link is now shadowed by an earlier
+            # command: it can never run, and --verify would fail on it. The
+            # previous manifest authorises removing it; the shadowing command
+            # is not touched. Install and verify now agree: a collision.
+            rm -f -- "$LARC_LINK" && info "Removed our shadowed $LARC_LINK."
+            warn "larc resolves to $larc_observed instead of our alias - leaving that command alone (recorded as a collision)."
+        else
+            warn "larc is already provided at $larc_observed - leaving it alone (not owned by this install)."
+        fi
+    else
+        ln -s -- "$INSTALL_BIN" "$LARC_LINK" || die "cannot create $LARC_LINK"
+        larc_state=owned
+        ok "Symlink $LARC_LINK -> $INSTALL_BIN"
+    fi
+
+    RC_FILE=$(pick_bashrc)
+    add_alias_block "$RC_FILE"
+
+    # ---- manifest (tab separated; read by uninstall_setup.sh and --verify)
+    # Keep the "file created" / "newline added" facts of the FIRST run: a
+    # re-run sees the file as existing and already newline-terminated.
+    if [[ -n $RC_FILE && -f $MANIFEST && ! -L $MANIFEST ]]; then
+        local k p c n
+        while IFS=$'\t' read -r k p c n; do
+            if [[ $k == bashrc && $p == "$RC_FILE" ]]; then
+                [[ $c == 1 ]] && RC_CREATED=1
+                [[ $n == 1 ]] && RC_ADDED_NL=1
+            fi
+        done <"$MANIFEST"
+    fi
+    sum=$(sha256_of "$INSTALL_BIN")
+    tmp=$(mktemp "$STATE_DIR/.manifest-XXXXXX") || die "cannot write the manifest"
+    {
+        printf '# linux-archive manifest - written by setup.sh %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'dir\t%s\troot:root\t755\n' "$INSTALL_DIR"
+        printf 'file\t%s\t%s\troot:root\t755\n' "$INSTALL_BIN" "$sum"
+        (( LINK_OK )) && printf 'symlink\t%s\t%s\n' "$LINK" "$INSTALL_BIN"
+        if [[ $larc_state == owned ]]; then
+            printf 'larc\t%s\t%s\towned\n' "$LARC_LINK" "$INSTALL_BIN"
+        else
+            printf 'larc\t%s\t%s\tcollision\t%s\n' "$LARC_LINK" "$INSTALL_BIN" "$larc_observed"
+        fi
+        [[ -n $RC_FILE ]] && printf 'bashrc\t%s\t%s\t%s\n' "$RC_FILE" "$RC_CREATED" "$RC_ADDED_NL"
+        printf 'lock\t%s\n' "$LOCK_FILE"
+    } >"$tmp"
+    if ! { chmod 0644 -- "$tmp" && mv -f -- "$tmp" "$MANIFEST"; }; then rm -f -- "$tmp"; die "cannot write $MANIFEST"; fi
+    ok "Manifest written: $MANIFEST"
+
+    # ---- verification
+    local own mode
+    own=$(stat -c '%U:%G' -- "$INSTALL_BIN") mode=$(stat -c '%a' -- "$INSTALL_BIN")
+    [[ $own == root:root && $mode == 755 ]] || die "unexpected ownership/mode on $INSTALL_BIN: $own $mode"
+    own=$(stat -c '%U:%G' -- "$INSTALL_DIR") mode=$(stat -c '%a' -- "$INSTALL_DIR")
+    [[ $own == root:root && $mode == 755 ]] || die "unexpected ownership/mode on $INSTALL_DIR: $own $mode"
+    ok "Verified: $INSTALL_DIR and the script are root:root, mode 755 (only root can modify them)."
+    if [[ -n $RC_FILE ]]; then
+        if verify_alias; then ok "Verified: a new user's interactive bash defines the 'linux-archive' alias."
+        else warn "A new user's interactive bash does not read $RC_FILE by default here; the $LINK command works anyway."; fi
+    fi
+    local sp=""
+    [[ -r /etc/sudoers ]] && sp=$(grep -E '^[[:space:]]*Defaults[[:space:]]+secure_path' /etc/sudoers)
+    if [[ -n $sp && $sp != */usr/local/bin* ]]; then
+        info "Note: sudo's secure_path here does not include /usr/local/bin; use 'sudo $LINK' if you ever need root."
+    fi
+    echo
+    info "Open a NEW terminal and type:  linux-archive"
+    info "It always works on the folder you are currently in."
 }

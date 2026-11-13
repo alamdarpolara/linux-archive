@@ -294,3 +294,29 @@ add_alias_block() {   # add_alias_block <bashrc>
     if [[ $state == ok ]]; then ok "Alias block in $rc refreshed (no duplicate added)."
     else ok "Alias block added to $rc."; fi
 }
+
+# Does a NEW user's interactive bash really see the alias?  Simulated with a
+# throw-away HOME populated from /etc/skel (no real user's files are read).
+#
+# The check must NOT inherit the caller's controlling terminal: `bash -i` turns
+# on job control and falls back to /dev/tty when stdin is not a tty, and
+# `timeout` runs its command in a background process group, so on a real
+# terminal bash is stopped by SIGTTIN/SIGTTOU.  Interactive bash also ignores
+# SIGTERM, so a plain `timeout` never ended it and setup.sh hung forever (and
+# the stuck child kept the setup lock).  Hence: setsid (new session, no
+# controlling tty - the same situation as cron/containers), `timeout -k`
+# (SIGKILL as a last resort) and the lock fd 9 closed for the child.
+verify_alias() {
+    local home out
+    local -a sess=()
+    home=$(mktemp -d) || return 1
+    if [[ -f /etc/skel/.bashrc ]]; then cp -- /etc/skel/.bashrc "$home/.bashrc"; fi
+    if command -v setsid >/dev/null 2>&1; then
+        # util-linux setsid needs -w to wait for the child; busybox setsid has no -w.
+        if setsid --help 2>&1 | grep -q -- '--wait'; then sess=(setsid -w); else sess=(setsid); fi
+    fi
+    out=$(cd / && env -i HOME="$home" TERM=dumb PATH="$PATH" \
+        "${sess[@]+"${sess[@]}"}" timeout -k 2 20 bash -i -c 'alias linux-archive' </dev/null 2>/dev/null 9>&-)
+    rm -rf -- "$home"
+    [[ $out == *"$INSTALL_BIN"* ]]
+}

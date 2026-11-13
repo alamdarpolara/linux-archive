@@ -320,3 +320,61 @@ verify_alias() {
     rm -rf -- "$home"
     [[ $out == *"$INSTALL_BIN"* ]]
 }
+
+# ---------------------------------------------------------------- install
+RC_FILE="" RC_CREATED=0 RC_ADDED_NL=0
+do_install() {
+    local src=$SRC_DIR/linux-archive.sh bashbin tmp sum
+    local larc_prior=0 larc_seen=0 larc_command="" larc_observed="" larc_state=""
+    [[ -f $src && ! -L $src ]] || die "linux-archive.sh not found next to setup.sh ($src)."
+    [[ $(head -n 1 -- "$src") == '#!/usr/bin/env bash' ]] || die "$src does not look like the linux-archive script."
+    grep -q '^readonly LA_VERSION=' "$src" || die "$src does not look like the linux-archive script."
+
+    # The absolute bash the installed copy will use (root-owned, not writable by others).
+    bashbin=""
+    for b in /bin/bash /usr/bin/bash; do
+        if [[ -x $b && $(stat -L -c '%u' -- "$b") == 0 ]] && ! [[ $(stat -L -c '%A' -- "$b") == ?????w???? || $(stat -L -c '%A' -- "$b") == ????????w? ]]; then
+            bashbin=$b; break
+        fi
+    done
+    [[ -n $bashbin ]] || die "no root-owned bash found in /bin or /usr/bin - run ./install.sh first."
+    "$bashbin" -n -- "$src" || die "$src has a syntax error - refusing to install it."
+
+    take_lock
+
+    check_parents "$INSTALL_BIN"
+    check_parents "$LINK"
+    check_parents "$LARC_LINK"
+    check_parents "$MANIFEST"
+    # A matching pre-existing symlink is not proof of ownership. Only the
+    # previous, root-owned manifest can authorize keeping/recreating our larc.
+    if [[ -f $MANIFEST && ! -L $MANIFEST && $(stat -c '%u' -- "$MANIFEST") == 0 ]]; then
+        local kind path target state observed
+        while IFS=$'\t' read -r kind path target state observed; do
+            [[ $kind == larc ]] || continue
+            (( larc_seen == 0 )) || die "$MANIFEST contains duplicate larc records - refusing to claim the alias."
+            larc_seen=1
+            [[ $path == "$LARC_LINK" && $target == "$INSTALL_BIN" && ( $state == owned || $state == collision ) ]] ||
+                die "$MANIFEST has an invalid larc record - refusing to claim the alias."
+            [[ $state != collision || -n $observed ]] || die "$MANIFEST has a collision with no observed path."
+            [[ $state == owned ]] && larc_prior=1
+        done <"$MANIFEST"
+    fi
+    [[ -L $INSTALL_DIR ]] && die "$INSTALL_DIR is a symlink - refusing to write through it."
+    [[ -L $STATE_DIR ]] && die "$STATE_DIR is a symlink - refusing to write through it."
+    if [[ -e $INSTALL_DIR ]]; then
+        local extra
+        extra=$(find "$INSTALL_DIR" -mindepth 1 ! -path "$INSTALL_BIN" -print -quit 2>/dev/null)
+        [[ -z $extra ]] || warn "$INSTALL_DIR contains files not created by setup.sh (e.g. $extra); uninstall will refuse to delete them."
+    fi
+
+    install -d -o root -g root -m 0755 -- "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
+    install -d -o root -g root -m 0755 -- "$STATE_DIR" || die "cannot create $STATE_DIR"
+    # Copy with the absolute interpreter line, then install atomically.
+    tmp=$(mktemp "$INSTALL_DIR/.la-new-XXXXXX") || die "cannot create a temp file in $INSTALL_DIR"
+    { printf '#!%s\n' "$bashbin"; tail -n +2 -- "$src"; } >"$tmp"
+    if ! { chown root:root -- "$tmp" && chmod 0755 -- "$tmp"; }; then rm -f -- "$tmp"; die "cannot set owner/mode"; fi
+    mv -f -- "$tmp" "$INSTALL_BIN" || { rm -f -- "$tmp"; die "cannot install $INSTALL_BIN"; }
+    cmp -s -- <(tail -n +2 -- "$src") <(tail -n +2 -- "$INSTALL_BIN") || die "the installed copy differs from the source (copy failed?)"
+    ok "Installed $INSTALL_BIN (root:root 0755, interpreter $bashbin)."
+}

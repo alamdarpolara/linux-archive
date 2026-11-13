@@ -257,3 +257,40 @@ check_parents() {   # check_parents <path>
         if [[ $perm == ?????w???? ]]; then die "$p is group-writable ($(stat -L -c '%G' -- "$p")) - refusing to install below it."; fi
     done
 }
+
+# ------------------------------------------------------------ alias block
+add_alias_block() {   # add_alias_block <bashrc>
+    local rc=$1 state tmp
+    if [[ -L $rc ]]; then
+        warn "$rc is a symlink - not editing it (the $LINK command still works everywhere)."
+        RC_FILE=""
+        return 0
+    fi
+    state=$(block_state "$rc" "$BEGIN_MARK" "$END_MARK")
+    [[ $state == broken ]] && die "$rc has a damaged linux-archive block (unbalanced markers) - fix it by hand, then re-run."
+    if [[ ! -f $rc ]]; then
+        mkdir -p -- "$(dirname -- "$rc")"
+        : >"$rc" && chmod 644 -- "$rc" && chown root:root -- "$rc"
+        RC_CREATED=1
+        info "Created $rc (sourced by the system-wide bash configuration)."
+    fi
+    tmp=$(mktemp "$rc.la-XXXXXX") || die "cannot create a temp file next to $rc"
+    if [[ $state == ok ]]; then strip_block "$rc" "$BEGIN_MARK" "$END_MARK" >"$tmp"; else cat -- "$rc" >"$tmp"; fi
+    if [[ -s $tmp && $(tail -c 1 -- "$tmp" | wc -l) -eq 0 ]]; then
+        printf '\n' >>"$tmp"
+        RC_ADDED_NL=1
+    fi
+    {
+        printf '%s\n' "$BEGIN_MARK"
+        printf "alias linux-archive='%s'\n" "$INSTALL_BIN"
+        printf '%s\n' "$END_MARK"
+    } >>"$tmp"
+    if [[ $state == ok ]] && cmp -s -- "$tmp" "$rc"; then
+        rm -f -- "$tmp"
+        ok "Alias block in $rc is already up to date (no duplicate added)."
+        return 0
+    fi
+    replace_file "$tmp" "$rc" || { rm -f -- "$tmp"; die "could not update $rc"; }
+    if [[ $state == ok ]]; then ok "Alias block in $rc refreshed (no duplicate added)."
+    else ok "Alias block added to $rc."; fi
+}

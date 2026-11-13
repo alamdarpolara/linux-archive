@@ -209,3 +209,36 @@ take_lock() {
         exit 6
     fi
 }
+
+# --------------------------------------------------------------- helpers
+sha256_of() { sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# Print a file without one marked block (exact line matches, no regexes).
+strip_block() {   # strip_block <file> <begin> <end>
+    local line skip=0
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == "$2" ]]; then skip=1; continue; fi
+        if (( skip )); then [[ $line == "$3" ]] && skip=0; continue; fi
+        printf '%s\n' "$line"
+    done <"$1"
+}
+
+block_state() {   # block_state <file> <begin> <end> -> none | ok | broken
+    local b e
+    [[ -f $1 ]] || { echo none; return; }
+    b=$(grep -cFx -- "$2" "$1")
+    e=$(grep -cFx -- "$3" "$1")
+    if (( b == 0 && e == 0 )); then echo none
+    elif (( b == 1 && e == 1 )); then echo ok
+    else echo broken; fi
+}
+
+# Replace <target> atomically with <new>, keeping owner, mode and SELinux label.
+replace_file() {   # replace_file <new-file> <target>
+    chmod --reference="$2" -- "$1" || return 1
+    chown --reference="$2" -- "$1" || return 1
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled && command -v chcon >/dev/null 2>&1; then
+        chcon --reference="$2" -- "$1" 2>/dev/null || true
+    fi
+    mv -f -- "$1" "$2"
+}

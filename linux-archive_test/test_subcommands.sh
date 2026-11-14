@@ -109,3 +109,54 @@ for invalid in /etc/passwd ../sample.txt folder/../sample.txt missing.txt; do
     cli_run "$D" '' tar "$invalid"
     if (( CLI_RC == 2 )) && grep -q 'Usage:' "$CLI_LOG" && ! grep -q 'Main menu' "$CLI_LOG"; then t_ok "invalid path $(printf '%q' "$invalid") is refused (2, usage, no menu)"; else t_bad "invalid path $(printf '%q' "$invalid")" "rc=$CLI_RC"; fi
 done
+cli_run "$D" '' gz folder
+if (( CLI_RC == 2 )); then t_ok 'single-file format refuses a directory'; else t_bad 'single-file directory' "rc=$CLI_RC"; fi
+ln -s sample.txt "$D/source-link"
+cli_run "$D" '' xz source-link
+if (( CLI_RC == 2 )); then t_ok 'single-file format refuses a symlink'; else t_bad 'single-file symlink' "rc=$CLI_RC"; fi
+cli_run "$D" '' zst sample.txt second.txt
+if (( CLI_RC == 2 )); then t_ok 'single-file format refuses two inputs'; else t_bad 'single-file multiple' "rc=$CLI_RC"; fi
+for bad in mystery '--password=secret' '--format=zip'; do
+    # These must report a usage error before even probing the terminal.
+    cli_run "$D" '' "$bad"
+    if (( CLI_RC == 2 )) && grep -q 'Usage:' "$CLI_LOG" && ! grep -q 'Main menu' "$CLI_LOG"; then t_ok "invalid CLI $bad returns 2 without menu"; else t_bad "invalid CLI $bad" "rc=$CLI_RC"; fi
+done
+cli_run "$D" '' unzip --format=zip
+if (( CLI_RC == 2 )) && grep -q 'Usage:' "$CLI_LOG"; then t_ok 'unzip rejects format option'; else t_bad 'unzip format option' "rc=$CLI_RC"; fi
+# Input validation must not regress when invoking archive tools from argv.
+mkdir -p "$D/envcheck"
+printf 'environment payload\n' > "$D/envcheck/clean.txt"
+printf 'printf "sourced by: %%s\\n" "$0" >> "%s"\n' "$D/envcheck/marker" > "$D/envcheck/bashenv"
+( cd "$D/envcheck" && printf '1\n\n' | env BASH_ENV="$D/envcheck/bashenv" TAR_OPTIONS=--to-stdout GZIP=-1 XZ_OPT=-0 \
+    SHELLOPTS=braceexpand:hashall:interactive-comments:monitor "$LA" --plain tar.gz clean.txt >"$D/envcheck/create.out" 2>&1 )
+( cd "$D/envcheck" && printf '1\nclean_extracted\n' | env BASH_ENV="$D/envcheck/bashenv" TAR_OPTIONS=--to-stdout \
+    "$LA" --plain unzip clean.txt.tar.gz >"$D/envcheck/extract.out" 2>&1 )
+if [[ -s $D/envcheck/clean.txt.tar.gz && -f $D/envcheck/clean_extracted/clean.txt ]] &&
+    ! grep -q 'linux-archive-pipe' "$D/envcheck/marker" 2>/dev/null; then
+    t_ok 'direct route neutralises BASH_ENV, SHELLOPTS and archive tool options in children'
+else t_bad 'hostile environment with direct arguments' "$(tail -n 4 "$D/envcheck/extract.out" | tr '\n' '|')"; fi
+# The content detector rejects a misleading extension, just as the picker does.
+printf 'not an archive\n' > "$D/not-real.zip"
+cli_run "$D" '' unzip not-real.zip
+if (( CLI_RC == 2 )) && ! grep -q 'Choose the archive' "$CLI_LOG"; then t_ok 'direct unzip rejects fake archive by content'; else t_bad 'fake archive direct unzip' "rc=$CLI_RC"; fi
+# Neither default nor final output may write through a pre-created symlink.
+printf 'victim\n' > "$D/victim"
+ln -s victim "$D/second.txt.tar"
+cli_run "$D" $'\n\n' tar second.txt
+if (( CLI_RC == 0 )) && [[ $(<"$D/victim") == victim && -L $D/second.txt.tar && -s $D/second.txt_2.tar ]] && grep -q 'symbolic link - refused' "$CLI_LOG"; then t_ok 'direct output symlink refused; renamed under original flock/mv policy'; else t_bad 'direct output symlink refusal' "rc=$CLI_RC"; fi
+mkdir -p "$D/destcheck/victimdir"
+cp "$D/sample.txt.zip" "$D/destcheck/"
+ln -s victimdir "$D/destcheck/sample.txt"
+cli_run "$D/destcheck" $'1\n\n\n' unzip sample.txt.zip
+if (( CLI_RC == 0 )) && [[ -L $D/destcheck/sample.txt && -z $(ls -A "$D/destcheck/victimdir") && -f $D/destcheck/sample.txt_2/sample.txt ]] && grep -q 'symbolic link - refused' "$CLI_LOG"; then t_ok 'direct unzip destination symlink refused, victim untouched'; else t_bad 'direct unzip destination symlink' "rc=$CLI_RC"; fi
+# Compare both entry points against the same source, without relying on setup.
+ln -s "$LA" "$D/larc"
+ln -s "$LA" "$D/linux-archive"
+version=$("$LA" --version)
+if [[ $("$D/larc" --version) == "larc ${version#* }" && $("$D/linux-archive" --version) == "$version" ]] && "$D/larc" --help | grep -q '^Usage: larc '; then t_ok 'larc resolves same script and uses its invocation name'; else t_bad 'larc invocation' ''; fi
+mkdir -p "$D/long" "$D/short"
+cp -p "$D/sample.txt" "$D/long/sample.txt"      # same mtime: tar stores it to the second
+cp -p "$D/sample.txt" "$D/short/sample.txt"
+( cd "$D/long" && printf '\n' | "$D/linux-archive" --plain tar sample.txt >"$D/long.out" 2>&1 )
+( cd "$D/short" && printf '\n' | "$D/larc" --plain tar sample.txt >"$D/short.out" 2>&1 )
+if cmp -s "$D/long/sample.txt.tar" "$D/short/sample.txt.tar" && grep -q 'Archive created and verified' "$D/long.out" && grep -q 'Archive created and verified' "$D/short.out"; then t_ok 'larc and linux-archive direct flows produce identical archives'; else t_bad 'larc vs linux-archive result' ''; fi

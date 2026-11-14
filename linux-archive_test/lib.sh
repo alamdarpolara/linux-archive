@@ -123,3 +123,55 @@ fmt_ext() {
 fmt_nlevels() {
     case $1 in zip) echo 5;; 7z) echo 6;; tar) echo 0;; tar.gz|tar.bz2|gz|squashfs) echo 4;; tar.xz|xz) echo 4;; tar.zst|zst) echo 5;; esac
 }
+
+# la_run <cwd> <answer>...  : run linux-archive in plain mode, one answer per line.
+# Output goes to $LA_OUT, exit status to $LA_RC.  Answers are written with
+# printf %s so secrets with backslashes etc. arrive untouched.
+la_run() {
+    local cwd=$1
+    shift
+    LA_OUT=${LA_OUT:-/tmp/la_out.$$}
+    ( cd -- "$cwd" && printf '%s\n' "$@" | "$LA" --plain --no-color >"$LA_OUT" 2>&1 )
+    LA_RC=$?
+}
+
+# zip_run <cwd> <single|multi> <items> <fmt> <level#|-> <pw|-> <name|""> [exists-action]
+zip_run() {
+    local cwd=$1 sel=$2 items=$3 fmt=$4 lvl=$5 pw=$6 name=$7 exists=${8:-}
+    local -a a=(1)
+    if [[ $sel == single ]]; then a+=(1 "$items"); else a+=(2 "$items"); fi
+    a+=("$(fmt_num "$fmt")")
+    [[ $lvl != - ]] && a+=("$lvl")
+    if [[ $fmt == zip || $fmt == 7z ]]; then
+        if [[ $pw == - ]]; then a+=(1); else a+=(2 "$pw" "$pw"); fi
+    fi
+    a+=("$name")
+    case $exists in
+        overwrite) a+=(1) ;;
+        rename) a+=(2 "") ;;
+        skip) a+=(3) ;;
+    esac
+    if [[ $exists == skip ]]; then a+=(3); else a+=("" 3); fi
+    la_run "$cwd" "${a[@]}"
+}
+
+# unzip_run <cwd> <enc: none|data|header> <pw|-> [links-action] [dest-answer] [review-choice]
+#   cwd must contain exactly one archive (it is menu entry 1).
+unzip_run() {
+    local cwd=$1 enc=$2 pw=$3 links=${4:-} dest=${5:-} review=${6:-1}
+    local -a a=(2 1)
+    [[ $enc == header ]] && a+=("$pw")
+    a+=("$review")
+    if [[ $review == 1 ]]; then
+        a+=("$dest")
+        [[ $enc == data ]] && a+=("$pw")
+        [[ -n $links ]] && a+=("$links")
+        a+=("")
+    fi
+    a+=(3)
+    la_run "$cwd" "${a[@]}"
+}
+
+no_leftovers() {   # no .linux-archive.* temp folders in <dir>
+    [[ -z $(find "$1" -maxdepth 1 -name '.linux-archive.*' -print -quit) ]]
+}

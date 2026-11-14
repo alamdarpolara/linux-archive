@@ -1,0 +1,6 @@
+build
+linux-archive_test/samples/rar_dl/x_*
+linux-archive_test/work
+linux-archive_test/work_*
+
+.git

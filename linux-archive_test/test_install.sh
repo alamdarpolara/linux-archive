@@ -152,6 +152,69 @@ base)
         echo "$out" | grep -q 're-running with sudo' && t_ok "it announced the sudo re-run" || t_bad "sudo announcement" ""
     else t_skip "sudo re-exec" "sudo not installable"; fi
     ;;
+nonfree)
+    t_section "--yes --with-nonfree: the real unrar from the distribution's non-free source"
+    out=$(sh "$INSTALL" --yes --with-nonfree 2>&1); rc=$?
+    echo "$out" | tail -n 36 | sed 's/^/    | /'
+    [ $rc -eq 0 ] && t_ok "exits 0" || t_bad "rc" "$rc"
+    m=$(all_cmds); [ $? -eq 0 ] && t_ok "every required command exists" || t_bad "required commands" "$m"
+    if [ "$FAM" = alpine ]; then
+        if echo "$out" | grep -q 'does not package the non-free unrar' && ! real_unrar; then t_ok "Alpine: honest message (no unrar package), free fallback used"; else t_bad "alpine nonfree" ""; fi
+    elif real_unrar; then
+        t_ok "the REAL non-free unrar is installed ($(unrar 2>&1 </dev/null | grep -m1 UNRAR))"
+    elif command -v 7z >/dev/null 2>&1 && 7z i 2>/dev/null | sed -n '/^Codecs:/,/^Hashers:/p' | grep -q ' Rar5$'; then
+        t_ok "7-Zip already includes the RAR decoder here - no extra non-free package needed"
+    elif echo "$out" | grep -q "unrar' does not run here" && ! command -v unrar >/dev/null 2>&1; then
+        t_ok "the distribution's unrar does not run on this CPU ($(echo "$out" | grep -o "does not run here.*" | head -n 1 | cut -c1-80)) - reported honestly, removed again, free fallback used"
+    else t_bad "non-free unrar" "$(echo "$out" | grep -E 'RAR|unrar' | tail -n 3)"; fi
+    case $FAM in
+        debian) if pm_has unrar; then
+                    if [ -e /etc/apt/sources.list.d/linux-archive-nonfree.sources ] || [ -e /etc/apt/sources.list.d/linux-archive-multiverse.sources ]; then
+                        t_ok "component added in a separate file: $(ls /etc/apt/sources.list.d/linux-archive-*.sources)"
+                    else t_ok "unrar was already available from the enabled components (nothing added)"; fi
+                    apt-get update 2>&1 | grep -qi 'conflicting\|doesn.t have the component\|Signed-By' && t_bad "apt warnings after adding the source" "" || t_ok "apt is healthy after the change (no conflicting Signed-By)"
+                fi ;;
+        fedora|el) if real_unrar; then
+                       rpm -q rpmfusion-nonfree-release >/dev/null 2>&1 && t_ok "RPM Fusion nonfree enabled with GPG-verified release packages ($(rpm -q rpmfusion-nonfree-release))" || t_bad "rpmfusion" ""
+                   elif echo "$out" | grep -q 'removing it again'; then
+                       if ! rpm -q rpmfusion-nonfree-release >/dev/null 2>&1; then t_ok "RPM Fusion did not work here - it was removed again (dnf stays healthy)"; else t_bad "rpmfusion rollback" ""; fi
+                   fi ;;
+        suse) if real_unrar; then
+                  zypper -n -q lr -E 2>/dev/null | grep -qi 'non-oss' && t_ok "openSUSE non-oss repository enabled for unrar" || t_bad "non-oss" ""
+              else t_ok "openSUSE: 7-Zip already reads RAR, so no non-oss repository was needed or enabled"; fi ;;
+    esac
+    out=$(sh "$INSTALL" --yes --with-nonfree 2>&1); rc=$?
+    if [ $rc -eq 0 ] && ! echo "$out" | grep -q 'installed now'; then t_ok "re-run with --with-nonfree changes nothing"; else t_bad "nonfree re-run" "rc=$rc"; fi
+    ;;
+interactive)
+    # Runs in the TEST image (all tools present, so no package manager run can
+    # swallow the typed answer): the real unrar / RAR-capable 7-Zip is hidden
+    # for a moment so that install.sh has to ask the RAR question.
+    t_section "interactive RAR question through a pseudo-terminal (answer: n)"
+    hidden=""
+    for c in unrar unrar-nonfree; do
+        p=$(command -v "$c" 2>/dev/null) || continue
+        p=$(readlink -f "$p"); mv "$p" "$p.hidden" && hidden="$hidden $p"
+    done
+    if command -v 7z >/dev/null 2>&1 && 7z i 2>/dev/null | sed -n '/^Codecs:/,/^Hashers:/p' | grep -q ' Rar5$'; then
+        t_skip "interactive question" "7-Zip already includes the RAR decoder here, so install.sh never asks"
+    elif command -v expect >/dev/null 2>&1; then
+        cat > /tmp/q.exp <<EOF
+set timeout 600
+spawn sh $INSTALL
+expect {
+    -re {Install the non-free unrar\? \[y/N\]} { send "n\r"; exp_continue }
+    -re {Enable EPEL now\? \[y/N\]} { send "n\r"; exp_continue }
+    eof {}
+}
+EOF
+        out=$(expect /tmp/q.exp 2>&1 | tr -d '\r'); rc=$?
+        echo "$out" | grep -E 'RAR|unrar|NON-FREE|\[y/N\]' | sed 's/^/    | /'
+        if echo "$out" | grep -q 'Install the non-free unrar? \[y/N\]' && echo "$out" | grep -q 'NON-FREE'; then t_ok "the question explains the non-free licence and defaults to No"; else t_bad "question shown" "$(echo "$out" | tail -n 5)"; fi
+        if ! real_unrar && echo "$out" | grep -q 'Non-free software is not installed'; then t_ok "answer 'n': nothing non-free is installed"; else t_bad "answer n" ""; fi
+    else t_skip "interactive question" "expect not available in this image"; fi
+    for p in $hidden; do mv "$p.hidden" "$p"; done
+    ;;
 esac
 printf '\n==== SUMMARY: %d passed, %d failed, %d skipped ====\n' "$PASS" "$FAIL" "$SKIP"
 [ $FAIL -gt 0 ] && printf 'Failed tests:%s\n' "$FAILED" | tr '|' '\n'

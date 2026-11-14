@@ -87,3 +87,25 @@ cp "$D/formats/tar.gz/sample.txt.tar.gz" "$D/multi_unzip/a.tar.gz"
 cp "$D/formats/7z/sample.txt.7z" "$D/multi_unzip/b.7z"
 cli_run "$D/multi_unzip" $'1\n\n1\n\n' unzip a.tar.gz b.7z
 if (( CLI_RC == 0 )) && [[ -f $D/multi_unzip/a/sample.txt && -f $D/multi_unzip/b/sample.txt ]] && [[ $(grep -c 'Extraction finished and verified' "$CLI_LOG") == 2 ]]; then t_ok 'unzip two file arguments processes both'; else t_bad 'unzip multiple files' "rc=$CLI_RC $(tail -n 5 "$CLI_LOG" | tr '\n' '|')"; fi
+
+# Exercise direct selection of directories and multiple files, as well as --.
+mkdir -p "$D/folder"; printf 'inside\n' > "$D/folder/inside.txt"
+cli_run "$D" $'1\n\n' tar.gz folder second.txt
+if (( CLI_RC == 0 )) && tar -tzf "$D/cli.tar.gz" | grep -q 'folder/inside.txt'; then t_ok 'multiple CLI items include directory recursively'; else t_bad 'multiple CLI items' "rc=$CLI_RC"; fi
+printf 'dash\n' > "$D/-leading file.txt"
+cli_run "$D" $'\n' tar -- '-leading file.txt'
+if (( CLI_RC == 0 )) && [[ -s $D/-leading\ file.txt.tar ]] && tar -tf "$D/-leading file.txt.tar" | grep -q -- '-leading file.txt'; then t_ok '-- preserves a leading-dash filename'; else t_bad 'leading dash argument' "rc=$CLI_RC"; fi
+for name in 'a b.txt' "quote'single.txt" 'dq"uote.txt' 'ünïcödé 日本語.txt' $'new\nline.txt' $'evil‮gpj.txt' $'\e[31mred\e[0m.txt'; do
+    printf 'hostile filename payload\n' >"$D/$name"
+    cli_run "$D" $'\n' tar -- "$name"
+    if (( CLI_RC == 0 )) && [[ -s $D/${name//$'\n'/_}.tar ]]; then
+        t_ok "direct hostile-name archive: $(printf '%q' "$name")"
+    elif (( CLI_RC == 0 )) && grep -q 'Archive created and verified' "$CLI_LOG"; then
+        t_ok "direct hostile-name archive: $(printf '%q' "$name")"
+    else t_bad "direct hostile-name archive: $(printf '%q' "$name")" "rc=$CLI_RC"; fi
+    if [[ $(cat "$CLI_LOG") == *$'\e'* || $(cat "$CLI_LOG") == *$'‮'* ]]; then t_bad 'CLI terminal sanitisation' "$(printf '%q' "$name")"; fi
+done
+for invalid in /etc/passwd ../sample.txt folder/../sample.txt missing.txt; do
+    cli_run "$D" '' tar "$invalid"
+    if (( CLI_RC == 2 )) && grep -q 'Usage:' "$CLI_LOG" && ! grep -q 'Main menu' "$CLI_LOG"; then t_ok "invalid path $(printf '%q' "$invalid") is refused (2, usage, no menu)"; else t_bad "invalid path $(printf '%q' "$invalid")" "rc=$CLI_RC"; fi
+done

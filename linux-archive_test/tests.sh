@@ -362,5 +362,68 @@ if want extract; then
         t_skip "RAR with encrypted file contents" "skipped: fixture not present"
     fi
 fi
+
+# ---------------------------------------------------------- negative tests
+if want negative; then
+    t_section "negative cases"
+    N=$T/neg
+    mk_neg() { rm -rf "${N:?}/$1"; mkdir -p "$N/$1"; }
+    # --- wrong password (7z header-enc + zip AES) and retry that succeeds
+    mkdir -p "$T/pwsrc"; printf 'secret data\n' > "$T/pwsrc/s.txt"
+    ( cd "$T" && printf '%s\n' 1 1 "$(index_of "$T" pwsrc)" 2 6 2 "good pw" "good pw" "" "" 3 | "$LA" --plain --no-color >"$LA_OUT" 2>&1 )
+    mk_neg wp7z; cp "$T/pwsrc.7z" "$N/wp7z/" 2>/dev/null
+    la_run "$N/wp7z" 2 1 bad1 bad2 bad3 3
+    if grep -q 'Wrong password' "$LA_OUT" && grep -q 'Too many wrong passwords' "$LA_OUT" && [[ ! -d $N/wp7z/pwsrc ]] && no_leftovers "$N/wp7z"; then t_ok "7z (header-encrypted): 3 wrong passwords -> refused, nothing created"; else t_bad "wrong password 7z" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    mk_neg wp7zretry; cp "$T/pwsrc.7z" "$N/wp7zretry/"
+    la_run "$N/wp7zretry" 2 1 bad1 "good pw" 1 "" "" 3
+    if [[ $(cat "$N/wp7zretry/pwsrc/pwsrc/s.txt" 2>/dev/null) == 'secret data' ]]; then t_ok "7z: wrong password, then the right one -> extracted"; else t_bad "7z retry" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    ( cd "$T" && printf '%s\n' 1 1 "$(index_of "$T" pwsrc)" 1 1 2 "zip pw" "zip pw" "pwsrc_aes.zip" "" 3 | "$LA" --plain --no-color >"$LA_OUT" 2>&1 )
+    ( cd "$T" && printf '%s\n' 1 1 "$(index_of "$T" pwsrc)" 1 1 1 "pwsrc_plain.zip" "" 3 | "$LA" --plain --no-color >"$LA_OUT" 2>&1 )
+    mk_neg wpzip; cp "$T/pwsrc_aes.zip" "$N/wpzip/"
+    la_run "$N/wpzip" 2 1 1 "" bad1 bad2 bad3 "" 3
+    if grep -q 'Too many wrong passwords' "$LA_OUT" && [[ ! -d $N/wpzip/pwsrc_aes ]] && no_leftovers "$N/wpzip"; then t_ok "zip AES-256 (data-encrypted): 3 wrong passwords -> refused, nothing created"; else t_bad "wrong password zip" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    # password asked ONLY when needed: plain zip must not prompt
+    mk_neg nopw; cp "$T/pwsrc_plain.zip" "$N/nopw/"
+    la_run "$N/nopw" 2 1 1 "" "" 3
+    if ! grep -qi 'password' "$LA_OUT" && [[ $(cat "$N/nopw/pwsrc_plain/pwsrc/s.txt" 2>/dev/null) == 'secret data' ]]; then t_ok "unencrypted zip: no password prompt, extracted directly"; else t_bad "no prompt for plain zip" "$(grep -i password "$LA_OUT" | head -2)"; fi
+    # --- corrupted / truncated
+    for kind in zip 7z tar.gz tar.xz tar.zst gz; do
+        mk_neg "c_$kind"; src=$T/samples/s.$kind
+        [[ $kind == gz ]] && src=$T/samples/single.txt.gz
+        [[ $kind == tar.xz || $kind == tar.zst || $kind == tar.gz || $kind == zip || $kind == 7z ]] || true
+        [[ -s $src ]] || { t_skip "corrupt $kind" "no sample"; continue; }
+        size=$(stat -c %s "$src")
+        # corrupt: overwrite bytes in the middle
+        cp "$src" "$N/c_$kind/bad.$kind"
+        python3 - "$N/c_$kind/bad.$kind" <<'PY'
+import sys
+p = sys.argv[1]
+b = bytearray(open(p, 'rb').read())
+m = len(b) // 2
+for i in range(m, min(m + 24, len(b))):
+    b[i] ^= 0xFF
+open(p, 'wb').write(b)
+PY
+        la_run "$N/c_$kind" 2 1 1 "" "" 3
+        if [[ ! -d $N/c_$kind/bad ]] && no_leftovers "$N/c_$kind" && grep -qiE 'fail|cannot read|damaged|error' "$LA_OUT"; then t_ok "corrupted $kind -> clear error, nothing extracted, no leftovers"; else t_bad "corrupted $kind" "rc=$LA_RC dir=$(ls -A "$N/c_$kind" | tr '\n' ' ') $(tail -n 4 "$LA_OUT" | tr '\n' '|')"; fi
+        mk_neg "t_$kind"; head -c $(( size * 6 / 10 )) "$src" > "$N/t_$kind/trunc.$kind"
+        la_run "$N/t_$kind" 2 1 1 "" "" 3
+        if [[ ! -d $N/t_$kind/trunc ]] && no_leftovers "$N/t_$kind" && grep -qiE 'fail|cannot read|damaged|truncated|error' "$LA_OUT"; then t_ok "truncated $kind -> clear error, nothing extracted, no leftovers"; else t_bad "truncated $kind" "rc=$LA_RC dir=$(ls -A "$N/t_$kind" | tr '\n' ' ') $(tail -n 4 "$LA_OUT" | tr '\n' '|')"; fi
+    done
+    # --- zero-byte, fake and renamed
+    mk_neg fake; : > "$N/fake/zero.zip"; echo "just text" > "$N/fake/fake.zip"; echo "text" > "$N/fake/fake.tar.gz"
+    head -c 200 /dev/urandom > "$N/fake/fake.7z"; mkdir "$N/fake/folder.zip"; echo x > "$N/fake/plain.txt"
+    la_run "$N/fake" 2 3
+    if grep -q 'No supported archive' "$LA_OUT" && grep -q 'hidden' "$LA_OUT" || grep -q '4 file(s)' "$LA_OUT"; then t_ok "zero-byte/fake archives are hidden (no supported archive found)"; else t_bad "fake archives hidden" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    cp "$T/samples/s.zip" "$N/fake/data.bin"; cp "$T/samples/s.tar.gz" "$N/fake/notes.txt"
+    la_run "$N/fake" 2 q 3
+    listing=$(sed -n '/Choose the archive/,/Choose 1-/p' "$LA_OUT")
+    if grep -q 'data.bin' <<<"$listing" && grep -q 'notes.txt' <<<"$listing" && ! grep -q 'plain.txt' <<<"$listing" && ! grep -q 'fake\.' <<<"$listing" && ! grep -q 'zero.zip' <<<"$listing" && ! grep -q 'folder.zip' <<<"$listing"; then
+        t_ok "unzip list: shows renamed real archives, hides text/fake/zero-byte/folders"
+    else t_bad "unzip list filter" "$(echo "$listing" | tr '\n' '|')"; fi
+    mk_neg renamed; cp "$T/samples/s.zip" "$N/renamed/data.bin"
+    la_run "$N/renamed" 2 1 1 "" "" 3
+    if [[ -f $N/renamed/data.bin_extracted/src/a.txt ]]; then t_ok "zip renamed to .bin: detected by content, extracted to data.bin_extracted/"; else t_bad "renamed zip" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+fi
 t_summary
 exit $(( FAIL > 0 ))

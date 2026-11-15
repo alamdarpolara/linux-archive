@@ -301,6 +301,66 @@ if want extract; then
         if [[ $(cat "$XD/s/usr/share/latest/f.txt" 2>/dev/null) == hello && $(readlink "$XD/s/usr/share/latest/lnk") == f.txt ]]; then t_ok "extract s.rpm (file + symlink)"; else t_bad "extract s.rpm" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
     else t_skip "extract s.rpm" "skipped: sample could not be built here (rpmbuild unavailable or failed)"; fi
 
+    # odd archive names: leading dash, newline
+    D=$T/ex/odd1; rm -rf "$D"; mkdir -p "$D"; cp "$T/samples/s.zip" "$D/-lead dash.zip"
+    unzip_run "$D" none -
+    if [[ -f "$D/-lead dash/src/a.txt" ]]; then t_ok "archive named '-lead dash.zip' (leading dash + space) extracts to './-lead dash/'"; else t_bad "leading-dash archive" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    D=$T/ex/odd2; rm -rf "$D"; mkdir -p "$D"; cp "$T/samples/s.zip" "$D/$(printf 'new\nline.zip')"
+    unzip_run "$D" none -
+    if [[ -f "$D/new_line/src/a.txt" ]]; then t_ok "archive with a NEWLINE in its name: extracted (folder name sanitised to new_line)"; else t_bad "newline archive name" "$(ls -A "$D" | tr '\n' '|') $(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    # a third-party ZipCrypto zip: weak-encryption warning, password still works
+    D=$T/ex/zipcrypto; rm -rf "$D"; mkdir -p "$D/src"; echo secret > "$D/src/s.txt"
+    ( cd "$D" && printf '%s\n' 'zc-pass' 'zc-pass' | { 7zz a -tzip -mem=ZipCrypto -p -bd zc.zip src >/dev/null 2>&1 || 7z a -tzip -mem=ZipCrypto -p -bd zc.zip src >/dev/null 2>&1; } )
+    mkdir -p "$D/x"; mv "$D/zc.zip" "$D/x/"
+    unzip_run "$D/x" data zc-pass
+    if grep -q 'ZipCrypto' "$LA_OUT" && [[ $(cat "$D/x/zc/src/s.txt" 2>/dev/null) == secret ]]; then t_ok "ZipCrypto zip: weak-encryption warning shown, correct password extracts"; else t_bad "ZipCrypto warning" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+
+    # Optional RAR fixtures are excluded from the public tree. Supply them
+    # locally only after verifying their redistribution rights.
+    # Which backend linux-archive picks here: real unrar > 7-Zip with RAR codec > unar > unrar-free > bsdtar.
+    RS=$HERE/samples/rar_dl
+    RAR_DECRYPTS=0
+    if [[ $(unrar 2>&1 </dev/null) == *UNRAR* ]] || (( SZ_HAS_RAR )); then RAR_DECRYPTS=1; fi
+    echo "RAR backend able to decrypt (real unrar or 7-Zip RAR codec): $RAR_DECRYPTS"
+    for f in test_read_format_rar5_compressed.rar test_read_format_rar5_stored.rar; do
+        if [[ ! -s $RS/$f ]]; then t_skip "extract $f" "skipped: fixture not present"; continue; fi
+        extract_sample "$RS/$f"
+        if [[ -n $(find "$XD" -type f ! -name '*.rar' -print -quit) ]]; then t_ok "extract $f (RAR5, plain)"
+        elif (( ! RAR_DECRYPTS )) && grep -qiE 'failed|nothing was extracted|cannot read' "$LA_OUT" && no_leftovers "$XD" && [[ $(bsdtar --version 2>&1) == *"libarchive 3."[0-3]"."* ]]; then
+            t_ok "extract $f: libarchive < 3.4 has no RAR5 reader - clean failure, no leftovers (documented limitation)"
+        else t_bad "extract $f" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    done
+    for f in test_read_format_rar4_encrypted_filenames.rar test_read_format_rar5_encrypted_filenames.rar; do
+        if [[ ! -s $RS/$f ]]; then
+            t_skip "extract $f (header-encrypted RAR)" "skipped: fixture not present"
+            if (( RAR_DECRYPTS )); then t_skip "wrong password $f" "skipped: fixture not present"; fi
+            continue
+        fi
+        XD=$T/ex/rar_$f; rm -rf "$XD"; mkdir -p "$XD"; cp "$RS/$f" "$XD/"
+        if (( RAR_DECRYPTS )); then
+            unzip_run "$XD" header password
+            n=$(find "$XD" -type f ! -name '*.rar' | wc -l)
+            if (( n == 4 )) && grep -q 'password-protected' "$LA_OUT"; then t_ok "extract $f (header-encrypted RAR, password via stdin)"; else t_bad "extract $f" "files=$n $(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+            XD=$T/ex/rarwrong_$f; rm -rf "$XD"; mkdir -p "$XD"; cp "$RS/$f" "$XD/"
+            la_run "$XD" 2 1 bad1 bad2 bad3 3
+            if grep -q 'Too many wrong passwords' "$LA_OUT" && [[ -z $(find "$XD" -type f ! -name '*.rar' -print -quit) ]] && no_leftovers "$XD"; then t_ok "wrong password x3 on $f -> refused, nothing left"; else t_bad "wrong password $f" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+        else
+            la_run "$XD" 2 1 3
+            if [[ -z $(find "$XD" -type f ! -name '*.rar' -print -quit) ]] && no_leftovers "$XD" && grep -qE 'cannot|not use it|not supported|refused|Cannot read' "$LA_OUT"; then t_ok "header-encrypted RAR without a decrypting RAR tool: refused honestly, nothing left"; else t_bad "encrypted RAR refusal" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+        fi
+    done
+    if [[ -s $RS/test_read_format_rar5_encrypted.rar ]]; then
+        XD=$T/ex/rar_enc_data; rm -rf "$XD"; mkdir -p "$XD"; cp "$RS/test_read_format_rar5_encrypted.rar" "$XD/"
+        if (( RAR_DECRYPTS )); then
+            unzip_run "$XD" data password
+            if grep -q 'password' "$LA_OUT"; then t_ok "RAR with encrypted file contents: password prompt appears"; else t_bad "RAR data-encrypted prompt" ""; fi
+        else
+            la_run "$XD" 2 1 1 "" "" 3
+            if [[ ! -e $XD/test_read_format_rar5_encrypted/b.txt ]] && no_leftovers "$XD" && grep -qiE 'encrypted|cannot|failed' "$LA_OUT"; then t_ok "RAR with encrypted contents without a decrypting tool: refused/failed cleanly"; else t_bad "data-encrypted RAR refusal" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+        fi
+    else
+        t_skip "RAR with encrypted file contents" "skipped: fixture not present"
+    fi
 fi
 t_summary
 exit $(( FAIL > 0 ))

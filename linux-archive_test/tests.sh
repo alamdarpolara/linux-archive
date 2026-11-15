@@ -72,3 +72,41 @@ if want static; then
     check "no eval in linux-archive.sh" "found eval" bash -c "! grep -nE '(^|[^a-zA-Z_])eval[ (]' '$LA' | grep -v '^[0-9]*:#'"
     check "no 'ls' parsing in linux-archive.sh" "" bash -c "! grep -nE '\\bls\\b' '$LA' | grep -vE '^[0-9]*:[[:space:]]*#' | grep -qE '\\$\\(ls|\\| *ls|ls .*\\|'"
 fi
+
+# --------------------------------------------------------- direct CLI routes
+if want cli; then
+    # shellcheck source=test_subcommands.sh
+    . "$HERE/test_subcommands.sh"
+fi
+
+# ------------------------------------------------------------ data + matrix
+if want matrix || want leak || want overwrite; then
+    make_data "$T/parent/data"
+    echo "data set: $(find "$T/parent/data" | wc -l) entries, $(du -sh "$T/parent/data" | cut -f1)"
+fi
+DIDX=1
+
+verify_level_flag() {   # verify_level_flag <fmt> <lvl#> <archive> [password]: did the level flag reach the tool?
+    local fmt=$1 l=$2 arc=$3 pw=${4:--} b out
+    if [[ $pw != - ]]; then
+        out=$(printf '%s\n' "$pw" | (7zz l -slt "$arc" 2>/dev/null || 7z l -slt "$arc" 2>/dev/null))
+        case $fmt:$l in
+            zip:1) [[ $out == *'Path = data/bin/zeros.bin'*'Method = AES-256 Store'* ]] ;;
+            zip:2|zip:5) [[ $out == *'Method = AES-256 Deflate'* ]] ;;
+            7z:1) [[ $out == *'Method = Copy 7zAES'* ]] ;;
+            *) return 0 ;;
+        esac
+        return
+    fi
+    case $fmt:$l in
+        zip:1|zip:2|zip:5)
+            out=$(unzip -v "$arc" 2>/dev/null | grep 'bin/zeros.bin')   # 1 MiB of zeros: the method shows the level
+            case $l in 1) [[ $out == *Stored* ]] ;; 2) [[ $out == *Defl:F* ]] ;; 5) [[ $out == *Defl:X* ]] ;; esac ;;
+        7z:1) out=$(7zz l -slt "$arc" 2>/dev/null || 7z l -slt "$arc" 2>/dev/null); [[ $out == *'Method = Copy'* ]] ;;
+        gz:1) b=$(od -An -tu1 -j8 -N1 "$arc" | tr -d ' '); [[ $b == 4 ]] ;;
+        gz:4) b=$(od -An -tu1 -j8 -N1 "$arc" | tr -d ' '); [[ $b == 2 ]] ;;
+        *) return 0 ;;
+    esac
+}
+t_summary
+exit $(( FAIL > 0 ))

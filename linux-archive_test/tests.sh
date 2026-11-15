@@ -501,5 +501,43 @@ PY
     la_run "$N/zipuni" 1 1 1 1 4 2 "pässwörd" "pässwörd" q q q q q 3
     if grep -q 'only plain ASCII' "$LA_OUT" && [[ ! -e $N/zipuni/f.txt.zip ]] && no_leftovers "$N/zipuni"; then t_ok "zip + non-ASCII password: refused up front with an explanation (7z format accepts it)"; else t_bad "zip unicode password" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
 fi
+
+# ---------------------------------------------- overwrite / rename / skip
+if want overwrite; then
+    t_section "existing output: Overwrite / Rename / Skip (create and extract)"
+    P=$T/parent
+    zip_run "$P" single "$DIDX" tar - - exist.tar            # first creation
+    mkdir -p "$T/ow"; cp -r "$P/data/docs" "$T/ow/";
+    # Overwrite
+    zip_run "$P" single "$DIDX" tar.gz 3 - exist.tar.gz; zip_run "$P" single "$DIDX" tar.gz 3 - exist.tar.gz overwrite
+    if grep -q 'already exists' "$LA_OUT" && grep -q 'Archive created and verified' "$LA_OUT" && [[ -s $P/exist.tar.gz ]] && [[ ! -e $P/exist_2.tar.gz ]]; then t_ok "create: Overwrite replaces the file"; else t_bad "create overwrite" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    # Rename
+    zip_run "$P" single "$DIDX" tar.gz 3 - exist.tar.gz rename
+    if [[ -s $P/exist_2.tar.gz && -s $P/exist.tar.gz ]]; then t_ok "create: Rename writes exist_2.tar.gz and keeps the original"; else t_bad "create rename" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    # Skip
+    h1=$(sha256sum "$P/exist.tar.gz" | cut -d' ' -f1); before=$(ls "$P" | wc -l)
+    zip_run "$P" single "$DIDX" tar.gz 3 - exist.tar.gz skip
+    h2=$(sha256sum "$P/exist.tar.gz" | cut -d' ' -f1); after=$(ls "$P" | wc -l)
+    if [[ $h1 == "$h2" && $before == "$after" ]] && no_leftovers "$P"; then t_ok "create: Skip leaves everything untouched"; else t_bad "create skip" "before=$before after=$after"; fi
+    # output name equal to a selected item -> refused
+    zip_run "$P" single "$(index_of "$P" exist.tar)" tar - exist.tar q q q
+    # (answers after the refusal are extra; the point is that the item was never overwritten)
+    if [[ $(stat -c %s "$P/exist.tar") -gt 1000 ]]; then t_ok "create: archive can never replace its own source item"; else t_bad "self-overwrite guard" ""; fi
+    # extraction: destination exists
+    D=$T/ex/ow_extract; rm -rf "$D"; mkdir -p "$D/zz_old"; cp "$T/samples/s.zip" "$D/zz.zip"; mkdir -p "$D/zz"; echo OLD > "$D/zz/old.txt"
+    # menu entries sorted: folders first; archive is the only archive -> index 1
+    la_run "$D" 2 1 1 "" 1 y "" 3        # review=Extract, dest default 'zz' exists -> Overwrite -> confirm y
+    if [[ -f $D/zz/src/a.txt && ! -e $D/zz/old.txt ]]; then t_ok "extract: Overwrite replaces the existing folder (after confirmation)"; else t_bad "extract overwrite" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    D=$T/ex/ow_extract2; rm -rf "$D"; mkdir -p "$D/zz"; cp "$T/samples/s.zip" "$D/zz.zip"; echo OLD > "$D/zz/old.txt"
+    la_run "$D" 2 1 1 "" 1 y "" 3; rm -rf "$D/zz"; mkdir -p "$D/zz"; echo OLD > "$D/zz/old.txt"
+    la_run "$D" 2 1 1 "" 2 "" "" 3
+    if [[ -f $D/zz_2/src/a.txt && -f $D/zz/old.txt ]]; then t_ok "extract: Rename extracts to zz_2 and keeps the old folder"; else t_bad "extract rename" "$(ls -A "$D" | tr '\n' ' ') $(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    D=$T/ex/ow_extract3; rm -rf "$D"; mkdir -p "$D/zz"; cp "$T/samples/s.zip" "$D/zz.zip"; echo OLD > "$D/zz/old.txt"
+    la_run "$D" 2 1 1 "" 3 3
+    if [[ ! -d $D/zz/src && -f $D/zz/old.txt ]] && no_leftovers "$D"; then t_ok "extract: Skip leaves the existing folder untouched, nothing extracted"; else t_bad "extract skip" "$(ls -A "$D" | tr '\n' ' ')"; fi
+    D=$T/ex/ow_extract4; rm -rf "$D"; mkdir -p "$D/zz"; cp "$T/samples/s.zip" "$D/zz.zip"; echo OLD > "$D/zz/old.txt"
+    la_run "$D" 2 1 1 "" 1 n "" 3 3
+    if [[ -f $D/zz/old.txt && ! -d $D/zz/src ]]; then t_ok "extract: declining the delete-confirmation keeps the old folder"; else t_bad "extract overwrite decline" "$(ls -A "$D" | tr '\n' ' ')"; fi
+fi
 t_summary
 exit $(( FAIL > 0 ))

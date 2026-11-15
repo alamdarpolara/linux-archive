@@ -539,5 +539,117 @@ if want overwrite; then
     la_run "$D" 2 1 1 "" 1 n "" 3 3
     if [[ -f $D/zz/old.txt && ! -d $D/zz/src ]]; then t_ok "extract: declining the delete-confirmation keeps the old folder"; else t_bad "extract overwrite decline" "$(ls -A "$D" | tr '\n' ' ')"; fi
 fi
+
+# ------------------------------------------------------------- security
+if want security; then
+    t_section "security: hostile names and environment, symlinked outputs, concurrency, bombs, permissions"
+    S=$T/sec; rm -rf "$S"; mkdir -p "$S"
+    [[ -s $T/samples/s.zip ]] || mk_samples
+    # --- 1. escape sequences / bidi overrides / newlines in names never reach the terminal raw
+    mkdir -p "$S/ansi/w" "$S/ansi/x"
+    printf 'x\n' > "$S/ansi/w/"$'\e[31mred\e[0m.txt'
+    printf 'y\n' > "$S/ansi/w/"$'evil‮gpj.exe'
+    printf 'z\n' > "$S/ansi/w/"$'two\nlines\a.txt'
+    ( cd "$S/ansi/w" && tar -cf "$S/ansi/x/names.tar" . )
+    la_run "$S/ansi/w" 1 2 a q q q 3                       # zip, multi-select list with all names, then back out
+    out1=$(cat "$LA_OUT")
+    la_run "$S/ansi/x" 2 1 2 q 3                           # unzip: review screen lists the member names
+    out2=$(cat "$LA_OUT")
+    if [[ $out1$out2 != *$'\e'* && $out1$out2 != *$'‮'* && $out1$out2 != *$'\a'* ]] && grep -q '?\[31mred' <<<"$out1" && grep -q 'red' <<<"$out2"; then
+        t_ok "names with ESC sequences, U+202E and control characters are shown sanitised ('?'), never raw (menus and archive preview)"
+    else t_bad "terminal-escape sanitising" "$(printf '%s' "$out1$out2" | grep -a -m3 -E 'red|gpj' | od -c | head -n 4 | tr '\n' ' ')"; fi
+    # --- 2. hostile environment: BASH_ENV/ENV/CDPATH/IFS/TAR_OPTIONS and a PATH with fake tools first
+    E=$S/env; mkdir -p "$E/fakebin" "$E/w" "$E/x"
+    for b in 7z 7zz 7za tar gzip zip unzip xz zstd bsdtar file find mv; do
+        printf '#!/bin/sh\necho "FAKE %s was executed" >> "%s/marker"\nexit 1\n' "$b" "$E" > "$E/fakebin/$b"; chmod 755 "$E/fakebin/$b"
+    done
+    printf 'echo "BASH_ENV/ENV sourced by: $0" >> "%s/marker"\n' "$E" > "$E/evil.sh"
+    printf 'payload\n' > "$E/w/f.txt"
+    ( cd "$E/w" && printf '%s\n' 1 1 1 4 3 "" "" 3 | env BASH_ENV="$E/evil.sh" ENV="$E/evil.sh" CDPATH="$E" IFS=x \
+        TAR_OPTIONS=--to-stdout GZIP=-1 XZ_OPT=-0 PATH="$E/fakebin:$PATH" "$LA" --plain --no-color >"$E/out1" 2>&1 )
+    cp "$E/w/f.txt.tar.gz" "$E/x/" 2>/dev/null
+    ( cd "$E/x" && printf '%s\n' 2 1 1 "" "" 3 | env BASH_ENV="$E/evil.sh" ENV="$E/evil.sh" CDPATH="$E" IFS=x \
+        TAR_OPTIONS=--to-stdout PATH="$E/fakebin:$PATH" "$LA" --plain --no-color >"$E/out2" 2>&1 )
+    if [[ -s $E/w/f.txt.tar.gz ]] && grep -q 'Archive created and verified' "$E/out1" && [[ $(cat "$E/x/f.txt/f.txt" 2>/dev/null) == payload ]] && ! grep -q 'FAKE' "$E/marker" 2>/dev/null; then
+        t_ok "PATH with fake 7z/tar/gzip/... first: none of them ran (fixed PATH); TAR_OPTIONS=--to-stdout ignored (files really extracted)"
+    else t_bad "hostile PATH/TAR_OPTIONS" "$(cat "$E/marker" 2>/dev/null | head -3 | tr '\n' '|') $(tail -n 4 "$E/out2" | tr '\n' '|')"; fi
+    if ! grep -q 'linux-archive-pipe' "$E/marker" 2>/dev/null; then t_ok "BASH_ENV/ENV are NOT inherited by child shells (the tar.gz listing ran 'bash -c' without sourcing it)"
+    else t_bad "BASH_ENV in children" "$(cat "$E/marker")"; fi
+    if grep -q 'sourced by: .*linux-archive.sh' "$E/marker" 2>/dev/null; then
+        echo "    note: bash itself sources BASH_ENV before line 1 of the repo copy (documented limitation; the installed copy is the same bash behaviour, sudo resets the environment)"
+    fi
+    # --- 3. a pre-created symlink at the output path is refused (create and extract)
+    Y=$S/sym; mkdir -p "$Y/w" "$Y/x" "$Y/outside/vdir"
+    echo VICTIM > "$Y/outside/victim.txt"; echo data > "$Y/w/f.txt"
+    ln -s "$Y/outside/victim.txt" "$Y/w/f.txt.tar.gz"
+    la_run "$Y/w" 1 1 1 4 3 "" "" "" 3
+    if grep -q 'symbolic link - refused' "$LA_OUT" && [[ $(cat "$Y/outside/victim.txt") == VICTIM && -L $Y/w/f.txt.tar.gz && -s $Y/w/f.txt_2.tar.gz ]]; then
+        t_ok "create: output name that is a symlink to an outside file is refused; victim untouched; renamed to f.txt_2.tar.gz"
+    else t_bad "symlinked output (create)" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    cp "$T/samples/s.zip" "$Y/x/s.zip"; ln -s "$Y/outside/vdir" "$Y/x/s"
+    la_run "$Y/x" 2 1 1 "" "" "" 3
+    if grep -q 'symbolic link - refused' "$LA_OUT" && [[ -z $(ls -A "$Y/outside/vdir") && -f $Y/x/s_2/src/a.txt ]]; then
+        t_ok "extract: destination that is a symlink to an outside folder is refused; nothing written there; extracted to s_2/"
+    else t_bad "symlinked destination (extract)" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    # --- 4. two concurrent runs creating the same output name
+    C=$S/conc; mkdir -p "$C"; head -c 30000000 /dev/urandom > "$C/big.bin"
+    ( cd "$C" && printf '%s\n' 1 1 1 4 1 same.tar.gz "" 3 | "$LA" --plain --no-color >"$C/o1" 2>&1 ) &
+    p1=$!
+    ( cd "$C" && printf '%s\n' 1 1 1 4 1 same.tar.gz "" 3 | "$LA" --plain --no-color >"$C/o2" 2>&1 ) &
+    p2=$!
+    wait "$p1" "$p2"
+    nok=$(cat "$C/o1" "$C/o2" | grep -c 'Archive created and verified')
+    nref=$(cat "$C/o1" "$C/o2" | grep -cE 'created meanwhile|already exists')
+    if (( nok >= 1 )) && (( nok + nref == 2 )) && tar -tzf "$C/same.tar.gz" 2>/dev/null | grep -qxE '(\./)?big\.bin' && gzip -t "$C/same.tar.gz" && no_leftovers "$C"; then
+        t_ok "two concurrent runs writing same.tar.gz: one wins, the other refuses to overwrite; the archive is intact; no temp leftovers"
+    else t_bad "concurrent creates" "ok=$nok refused=$nref $(tail -n 3 "$C/o1" | tr '\n' '|') $(tail -n 3 "$C/o2" | tr '\n' '|')"; fi
+    # --- 5. hard zip-bomb limit: ratio >= 1000:1 with >= 1 GiB unpacked is refused outright
+    B=$S/hardbomb; mkdir -p "$B"
+    head -c 1181116006 /dev/zero | ( cd "$B" && zip -q -9 hb.zip - )
+    echo "    hard bomb: $(stat -c %s "$B/hb.zip") bytes -> 1.1 GiB"
+    la_run "$B" 2 1 3
+    if grep -q 'ZIP BOMB - refused' "$LA_OUT" && grep -q 'Extraction refused for safety' "$LA_OUT" && [[ ! -d $B/hb ]] && no_leftovers "$B"; then t_ok "zip bomb above the hard limit (1.1 GiB, ratio ~1000:1): refused outright, no 'extract anyway'"
+    else t_bad "hard zip bomb" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    rm -f "$B/hb.zip"
+    # --- 6. file-count bomb: more than 1,000,000 members
+    FC=$S/countbomb; mkdir -p "$FC"
+    python3 - "$FC/many.tar.gz" <<'PY2'
+import sys, tarfile
+with tarfile.open(sys.argv[1], 'w:gz', compresslevel=1) as t:
+    for i in range(1000001):
+        ti = tarfile.TarInfo('f%07d' % i); ti.size = 0; t.addfile(ti)
+PY2
+    la_run "$FC" 2 1 3
+    if grep -q 'file-count bomb' "$LA_OUT" && grep -q 'Extraction refused for safety' "$LA_OUT" && no_leftovers "$FC" && [[ ! -d $FC/many ]]; then t_ok "file-count bomb (1,000,001 members): refused before extraction"
+    else t_bad "file-count bomb" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    rm -f "$FC/many.tar.gz"
+    # --- 7. hard link whose target climbs out ('../'): refused from the listing
+    H=$S/hl; mkdir -p "$H"
+    python3 - "$H/hl.tar" <<'PY2'
+import sys, tarfile, io
+t = tarfile.open(sys.argv[1], 'w')
+ti = tarfile.TarInfo('ok.txt'); ti.size = 3; t.addfile(ti, io.BytesIO(b'ok\n'))
+ti = tarfile.TarInfo('hl'); ti.type = tarfile.LNKTYPE; ti.linkname = '../../outside.txt'; t.addfile(ti)
+t.close()
+PY2
+    la_run "$H" 2 1 3
+    if grep -q 'Extraction refused for safety' "$LA_OUT" && grep -q 'hard link whose target' "$LA_OUT" && [[ ! -d $H/hl ]]; then t_ok "hard link with a '../' target: refused (escape attempt), nothing extracted"
+    else t_bad "hard link escape" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    # --- 8. setuid / world-writable modes from an archive are not kept
+    P=$S/perm; mkdir -p "$P"
+    python3 - "$P/perm.zip" <<'PY2'
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1], 'w')
+for name, mode in (('suid.sh', 0o104777), ('ww.txt', 0o100666), ('sticky', 0o41777)):
+    zi = zipfile.ZipInfo(name + ('/' if mode & 0o40000 else '')); zi.create_system = 3; zi.external_attr = mode << 16
+    z.writestr(zi, '' if mode & 0o40000 else 'data\n')
+z.close()
+PY2
+    la_run "$P" 2 1 1 "" "" 3
+    m1=$(stat -c %a "$P/perm/suid.sh" 2>/dev/null); m2=$(stat -c %a "$P/perm/ww.txt" 2>/dev/null); m3=$(stat -c %a "$P/perm/sticky" 2>/dev/null)
+    if [[ -n $m1 && -n $m2 && -n $m3 ]] && ! find "$P/perm" -perm /7000 | grep -q . && ! find "$P/perm" ! -type l -perm -0002 | grep -q .; then
+        t_ok "setuid, sticky and world-writable modes from a zip are stripped (modes now: $m1 $m2 $m3)"
+    else t_bad "mode sanitising" "modes: $m1 $m2 $m3 $(tail -n 4 "$LA_OUT" | tr '\n' '|')"; fi
+fi
 t_summary
 exit $(( FAIL > 0 ))

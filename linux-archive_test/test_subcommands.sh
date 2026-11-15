@@ -160,3 +160,63 @@ cp -p "$D/sample.txt" "$D/short/sample.txt"
 ( cd "$D/long" && printf '\n' | "$D/linux-archive" --plain tar sample.txt >"$D/long.out" 2>&1 )
 ( cd "$D/short" && printf '\n' | "$D/larc" --plain tar sample.txt >"$D/short.out" 2>&1 )
 if cmp -s "$D/long/sample.txt.tar" "$D/short/sample.txt.tar" && grep -q 'Archive created and verified' "$D/long.out" && grep -q 'Archive created and verified' "$D/short.out"; then t_ok 'larc and linux-archive direct flows produce identical archives'; else t_bad 'larc vs linux-archive result' ''; fi
+
+# ---- gap a: one shared rule for the tool's own scratch names (.linux-archive.*)
+# The pickers hide them; the direct argv route must refuse them with the same
+# rule (a leftover scratch folder or a hostile file with that name must not be
+# archived or extracted by naming it on the command line).
+mkdir -p "$D/scratch"
+cp "$D/sample.txt" "$D/scratch/sample.txt"
+printf 'leftover\n' > "$D/scratch/.linux-archive.AbC123"
+cp "$D/sample.txt.zip" "$D/scratch/.linux-archive.AbC123.zip"
+for name in .linux-archive.AbC123 ./.linux-archive.AbC123; do
+    cli_run "$D/scratch" '' tar -- "$name"
+    if (( CLI_RC == 2 )) && grep -qi 'internal scratch name' "$CLI_LOG" && ! grep -q 'Archive created' "$CLI_LOG" && [[ -z $(find "$D/scratch" -maxdepth 1 -name '*.tar' -print -quit) ]]; then
+        t_ok "direct zip refuses the scratch name $(printf '%q' "$name") (exit 2, nothing created)"
+    else t_bad "direct zip refuses the scratch name $(printf '%q' "$name") (exit 2, nothing created)" "rc=$CLI_RC $(tail -n 3 "$CLI_LOG" | tr '\n' '|')"; fi
+done
+cli_run "$D/scratch" '' unzip .linux-archive.AbC123.zip
+if (( CLI_RC == 2 )) && grep -qi 'internal scratch name' "$CLI_LOG" && [[ -z $(find "$D/scratch" -maxdepth 1 -type d -name '.linux-archive.AbC123' -print -quit) ]]; then
+    t_ok 'direct unzip refuses a scratch name (exit 2, same message as zip)'
+else t_bad 'direct unzip refuses a scratch name (exit 2, same message as zip)' "rc=$CLI_RC $(tail -n 3 "$CLI_LOG" | tr '\n' '|')"; fi
+cli_run "$D/scratch" $'1\n' tar
+if ! grep -q '\.linux-archive\.' "$CLI_LOG" && grep -q 'sample.txt' "$CLI_LOG"; then t_ok 'the picker still hides scratch names'; else t_bad 'the picker still hides scratch names' "$(tail -n 4 "$CLI_LOG" | tr '\n' '|')"; fi
+
+# ---- gap d: larc and linux-archive give identical results, not only for tar
+# Same source copied with its mtime, one run per entry point; results are
+# compared byte for byte (archives) or tree for tree (extraction).
+parity_run() {   # parity_run <dir> <binary> <input> args...
+    local dir=$1 bin=$2 input=$3
+    shift 3
+    ( cd -- "$dir" && printf '%s' "$input" | "$bin" --plain --no-color "$@" >"$dir/run.out" 2>&1 )
+    PARITY_RC=$?
+}
+# Only the working folder name and the elapsed-time line may differ.
+parity_norm() { sed -E 's#par_(long|short)#par_X#g; s#(Time:[[:space:]]+)[0-9]+ s#\1N s#'; }
+parity_check() {   # parity_check <name> <input> <result> <bytes|zip> <archive args...>
+    local name=$1 input=$2 res=$3 mode=$4 w rl rs same=0
+    shift 4
+    for w in long short; do
+        rm -rf -- "$D/par_$w"; mkdir -p "$D/par_$w"
+        cp -p "$D/sample.txt" "$D/par_$w/sample.txt"
+        cp -p "$D/sample.txt.zip" "$D/par_$w/x.zip"
+    done
+    parity_run "$D/par_long" "$D/linux-archive" "$input" "$@"; rl=$PARITY_RC
+    parity_run "$D/par_short" "$D/larc" "$input" "$@"; rs=$PARITY_RC
+    if [[ $mode == zip ]]; then
+        # Info-ZIP stores the file's access time in the UT extra field, so two
+        # runs differ by a byte even for identical input: compare everything
+        # else exactly (other files, listing, integrity, member content).
+        if diff -r --exclude=run.out --exclude="$res" "$D/par_long" "$D/par_short" >/dev/null 2>&1 &&
+            diff <(zipinfo -l "$D/par_long/$res" | sed 1d) <(zipinfo -l "$D/par_short/$res" | sed 1d) >/dev/null 2>&1 &&
+            unzip -tq "$D/par_long/$res" >/dev/null 2>&1 && unzip -tq "$D/par_short/$res" >/dev/null 2>&1 &&
+            [[ $(unzip -p "$D/par_long/$res" | sha256sum) == "$(unzip -p "$D/par_short/$res" | sha256sum)" ]]; then same=1; fi
+    elif diff -r --exclude=run.out "$D/par_long" "$D/par_short" >/dev/null 2>&1; then same=1; fi
+    if (( rl == 0 && rs == 0 && same )) && [[ -e $D/par_long/$res ]] &&
+        diff -q <(parity_norm <"$D/par_long/run.out") <(parity_norm <"$D/par_short/run.out") >/dev/null; then
+        t_ok "$name"
+    else t_bad "$name" "rc=$rl/$rs result=$res $(diff -r --exclude=run.out "$D/par_long" "$D/par_short" 2>&1 | head -n 3 | tr '\n' '|') output: $(diff <(parity_norm <"$D/par_long/run.out") <(parity_norm <"$D/par_short/run.out") 2>&1 | head -n 4 | tr '\n' '|')"; fi
+}
+parity_check 'larc and linux-archive: zip sample.txt gives identical archive and output' $'1\n1\n1\n\n' sample.txt.zip zip zip sample.txt
+parity_check 'larc and linux-archive: 7z sample.txt gives identical archive and output' $'1\n1\n\n' sample.txt.7z bytes 7z sample.txt
+parity_check 'larc and linux-archive: unzip x.zip gives identical tree and output' $'1\n\n' x/sample.txt bytes unzip x.zip

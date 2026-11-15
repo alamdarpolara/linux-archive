@@ -424,6 +424,82 @@ PY
     mk_neg renamed; cp "$T/samples/s.zip" "$N/renamed/data.bin"
     la_run "$N/renamed" 2 1 1 "" "" 3
     if [[ -f $N/renamed/data.bin_extracted/src/a.txt ]]; then t_ok "zip renamed to .bin: detected by content, extracted to data.bin_extracted/"; else t_bad "renamed zip" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    # --- path traversal / absolute / symlink attacks
+    python3 - "$N" <<'PY'
+import sys, zipfile, tarfile, io, os
+n = sys.argv[1]
+def tar(name, ents):
+    t = tarfile.open(name, 'w')
+    for kind, nm, data in ents:
+        ti = tarfile.TarInfo(nm)
+        if kind == 'f': ti.size = len(data); t.addfile(ti, io.BytesIO(data))
+        elif kind == 'l': ti.type = tarfile.SYMTYPE; ti.linkname = data; t.addfile(ti)
+        elif kind == 'h': ti.type = tarfile.LNKTYPE; ti.linkname = data; t.addfile(ti)
+    t.close()
+for d in ('trav_zip', 'trav_tar', 'abs_zip', 'abs_tar', 'sym_tar', 'sym_zip', 'hard_tar', 'safe_links'):
+    os.makedirs(os.path.join(n, d), exist_ok=True)
+z = zipfile.ZipFile(n + '/trav_zip/trav.zip', 'w'); z.writestr('../../la_evil_zip.txt', 'EVIL'); z.writestr('ok.txt', 'fine'); z.close()
+tar(n + '/trav_tar/trav.tar', [('f', '../../la_evil_tar.txt', b'EVIL'), ('f', 'ok.txt', b'fine')])
+z = zipfile.ZipFile(n + '/abs_zip/abs.zip', 'w'); z.writestr('/tmp/la_abs_zip.txt', 'EVIL'); z.writestr('ok.txt', 'fine'); z.close()
+tar(n + '/abs_tar/abs.tar', [('f', '/tmp/la_abs_tar.txt', b'EVIL'), ('f', 'ok.txt', b'fine')])
+tar(n + '/sym_tar/sym.tar', [('l', 'lnk', '/tmp'), ('f', 'lnk/la_pwned_tar.txt', b'EVIL'), ('f', 'ok.txt', b'fine')])
+z = zipfile.ZipFile(n + '/sym_zip/sym.zip', 'w'); zi = zipfile.ZipInfo('lnk'); zi.create_system = 3; zi.external_attr = 0o120777 << 16
+z.writestr(zi, '/tmp'); z.writestr('lnk/la_pwned_zip.txt', 'EVIL'); z.writestr('ok.txt', 'fine'); z.close()
+tar(n + '/hard_tar/hard.tar', [('h', 'hl', '/etc/passwd'), ('f', 'ok.txt', b'fine')])
+tar(n + '/safe_links/links.tar', [('f', 'ok.txt', b'fine'), ('l', 'abs_link', '/etc/hostname'), ('l', 'up_link', '../../etc/passwd'), ('l', 'in_link', 'ok.txt')])
+PY
+    for c in trav_zip:trav.zip trav_tar:trav.tar abs_zip:abs.zip abs_tar:abs.tar sym_tar:sym.tar sym_zip:sym.zip; do
+        d=${c%%:*}; f=${c#*:}
+        la_run "$N/$d" 2 1 3
+        if grep -q 'Extraction refused for safety' "$LA_OUT" && [[ -z $(find "$N/$d" -mindepth 1 ! -name "$f" -print -quit) ]]; then t_ok "$d: dangerous archive refused, nothing extracted"; else t_bad "$d refused" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    done
+    # GNU cpio writes a member name containing LF literally in -tv output.
+    # The second line must not be mistaken for an independent safe entry.
+    mk_neg cpio_break
+    python3 - "$N/cpio_break/break.cpio" <<'PY'
+import sys
+
+def record(name, data):
+    name = name.encode('utf-8') + b'\0'
+    fields = (1, 0o100644, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(name), 0)
+    header = b'070701' + b''.join(('%08X' % value).encode('ascii') for value in fields)
+    head = header + name
+    return head + b'\0' * (-len(head) % 4) + data + b'\0' * (-len(data) % 4)
+
+with open(sys.argv[1], 'wb') as archive:
+    archive.write(record('ordinary\n/../../tmp/la_cpio_break_proof', b'NOPE'))
+    archive.write(record('TRAILER!!!', b''))
+PY
+    la_run "$N/cpio_break" 2 1 3
+    if grep -q 'Extraction refused for safety' "$LA_OUT" && grep -q 'line break' "$LA_OUT" &&
+        [[ ! -e /tmp/la_cpio_break_proof && ! -d $N/cpio_break/break ]] && no_leftovers "$N/cpio_break"; then
+        t_ok 'cpio member with a line break is refused before extraction'
+    else t_bad 'cpio line-break safety' "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    # hard link whose target is /etc/passwd: tar itself strips the '/', linux-archive warns; nothing may be linked
+    la_run "$N/hard_tar" 2 1 3
+    if grep -q 'Extraction refused for safety' "$LA_OUT" && grep -q 'hard link whose target' "$LA_OUT" && [[ -z $(find "$N/hard_tar" -samefile /etc/passwd 2>/dev/null) && ! -d $N/hard_tar/hard ]] && no_leftovers "$N/hard_tar"; then t_ok "hard link to /etc/passwd: refused (link target outside the archive), nothing extracted"; else t_bad "hard link attack" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    if [[ ! -e /tmp/la_evil_zip.txt && ! -e /tmp/la_evil_tar.txt && ! -e /tmp/la_abs_zip.txt && ! -e /tmp/la_abs_tar.txt && ! -e /tmp/la_pwned_tar.txt && ! -e /tmp/la_pwned_zip.txt && ! -e "$N/la_evil_zip.txt" && ! -e "$T/la_evil_zip.txt" && ! -e "$T/la_evil_tar.txt" ]]; then t_ok "no file escaped the extraction folder (checked /tmp and parents)"; else t_bad "escape check" "a file was written outside"; fi
+    # dangerous symlinks: warn + Remove (default)
+    la_run "$N/safe_links" 2 1 1 "" 1 "" 3
+    if [[ -f $N/safe_links/links/ok.txt && ! -e $N/safe_links/links/abs_link && ! -L $N/safe_links/links/abs_link && ! -L $N/safe_links/links/up_link && -L $N/safe_links/links/in_link ]] && grep -q 'point outside' "$LA_OUT"; then t_ok "dangerous symlinks (absolute, ../ escape) detected and removed; harmless relative link kept"; else t_bad "dangerous symlink handling" "$(ls -la "$N/safe_links/links" 2>&1 | tr '\n' '|') $(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    mk_neg keep_links; cp "$N/safe_links/links.tar" "$N/keep_links/"
+    la_run "$N/keep_links" 2 1 1 "" 2 "" 3
+    if [[ $(readlink "$N/keep_links/links/abs_link" 2>/dev/null) == /etc/hostname ]]; then t_ok "dangerous symlinks: 'Keep them' keeps the exact original target"; else t_bad "keep symlinks" "$(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    mk_neg abort_links; cp "$N/safe_links/links.tar" "$N/abort_links/"
+    la_run "$N/abort_links" 2 1 1 "" 3 "" 3
+    if [[ ! -d $N/abort_links/links ]] && no_leftovers "$N/abort_links"; then t_ok "dangerous symlinks: 'Abort' deletes everything extracted"; else t_bad "abort on symlinks" "$(ls -A "$N/abort_links" | tr '\n' ' ')"; fi
+    # --- zip bomb (small highly compressed file)
+    mk_neg bomb; head -c 314572800 /dev/zero | ( cd "$N/bomb" && zip -q -9 bomb.zip - )
+    echo "zip bomb: $(stat -c %s "$N/bomb/bomb.zip") bytes -> 300 MiB"
+    la_run "$N/bomb" 2 1 2 3
+    if grep -q 'ZIP BOMB' "$LA_OUT" && [[ ! -d $N/bomb/bomb ]] && no_leftovers "$N/bomb"; then t_ok "zip bomb (ratio ~1000:1): warned, default/Cancel extracts nothing"; else t_bad "zip bomb warning" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
+    la_run "$N/bomb" 2 1 1 "" "" 3
+    sz=$(stat -c %s "$N/bomb/bomb/-" 2>/dev/null || echo 0)
+    if (( sz == 314572800 )); then t_ok "zip bomb: 'Extract anyway' honoured when the user insists (size verified)"; else t_bad "zip bomb forced extract" "size=$sz"; fi
+    # --- 7-Zip cannot do non-ASCII ZIP passwords: refused up front with an explanation
+    mk_neg zipuni; echo data > "$N/zipuni/f.txt"
+    la_run "$N/zipuni" 1 1 1 1 4 2 "pässwörd" "pässwörd" q q q q q 3
+    if grep -q 'only plain ASCII' "$LA_OUT" && [[ ! -e $N/zipuni/f.txt.zip ]] && no_leftovers "$N/zipuni"; then t_ok "zip + non-ASCII password: refused up front with an explanation (7z format accepts it)"; else t_bad "zip unicode password" "$(tail -n 8 "$LA_OUT" | tr '\n' '|')"; fi
 fi
 t_summary
 exit $(( FAIL > 0 ))

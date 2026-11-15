@@ -651,5 +651,93 @@ PY2
         t_ok "setuid, sticky and world-writable modes from a zip are stripped (modes now: $m1 $m2 $m3)"
     else t_bad "mode sanitising" "modes: $m1 $m2 $m3 $(tail -n 4 "$LA_OUT" | tr '\n' '|')"; fi
 fi
+
+# --------------------------------------------------------- password leakage
+if want leak; then
+    t_section "password leakage proof (ps, /proc/*/cmdline, /proc/*/environ, history, logs, /tmp)"
+    SECRET='LaLeakCanary_91c7e2!pw'
+    mkdir -p "$T/bigparent/bigdir"
+    if [[ ! -s $T/bigparent/bigdir/big.bin ]]; then
+        { yes 'linux-archive test line with some compressible text 0123456789' | head -c 20000000; head -c 30000000 /dev/urandom; } > "$T/bigparent/bigdir/big.bin"
+    fi
+    echo "big file: $(du -h "$T/bigparent/bigdir/big.bin" | cut -f1)"
+    STOP=$T/leak.stop; HITS=$T/leak.hits; SEEN=$T/leak.seen
+    poller() {
+        local psout
+        : >"$HITS"; : >"$SEEN"
+        while [[ ! -e $STOP ]]; do
+            psout=$(ps -eo args= 2>/dev/null)
+            grep -aF -f <(printf '%s\n' "$SECRET") <<<"$psout" >>"$HITS"
+            grep -qE '(^|/)7z[za]? (a|x|t|l) ' <<<"$psout" && echo 1 >"$SEEN"
+            cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\0' '\n' | grep -aF -f <(printf '%s\n' "$SECRET") >>"$HITS"
+            cat /proc/[0-9]*/environ 2>/dev/null | tr '\0' '\n' | grep -aF -f <(printf '%s\n' "$SECRET") >>"$HITS"
+            sleep 0.03
+        done
+    }
+    rm -f "$STOP"; poller & PPID_POLL=$!
+    if command -v inotifywait >/dev/null; then
+        inotifywait -m -r -q -e create -e moved_to --format '%e %w%f' "$TMPDIR" /tmp /var/tmp /dev/shm >"$T/inotify.log" 2>/dev/null &
+        PID_INO=$!
+    fi
+    sleep 0.3
+    run_leak() {   # run_leak <desc> <fmt> <level#> <outname> ; creates then extracts with SECRET
+        local desc=$1 fmt=$2 lvl=$3 name=$4 ext enc
+        ext=$(fmt_ext "$fmt")
+        zip_run "$T/bigparent" single 1 "$fmt" "$lvl" "$SECRET" "$name"
+        if [[ -s $T/bigparent/$name ]] && grep -q 'Archive created and verified' "$LA_OUT"; then t_ok "leak-run: create $desc"; else t_bad "leak-run: create $desc" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; return; fi
+        if grep -qaF -f <(printf '%s\n' "$SECRET") "$LA_OUT"; then t_bad "password absent from linux-archive's own output ($desc create)" "found"; else t_ok "password absent from linux-archive's own output ($desc create)"; fi
+        enc=data; [[ $fmt == 7z ]] && enc=header
+        local d=$T/ex/leak_$name; rm -rf "$d"; mkdir -p "$d"; ln "$T/bigparent/$name" "$d/$name"
+        unzip_run "$d" "$enc" "$SECRET" 2
+        if cmp -s "$d/${name%"$ext"}/bigdir/big.bin" "$T/bigparent/bigdir/big.bin" 2>/dev/null; then t_ok "leak-run: extract $desc (50 MB, content identical)"; else t_bad "leak-run: extract $desc" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+        if grep -qaF -f <(printf '%s\n' "$SECRET") "$LA_OUT"; then t_bad "password absent from linux-archive's own output ($desc extract)" "found"; else t_ok "password absent from linux-archive's own output ($desc extract)"; fi
+    }
+    run_leak "7z -mx=9 header-encrypted" 7z 6 leak7.7z
+    run_leak "zip AES-256" zip 4 leakz.zip
+    # The new argv selection route uses the same hidden prompt and pipe, not a
+    # password argument. Keep the process poller running throughout this run.
+    ( cd "$T/bigparent" && printf '%s\n' 1 2 "$SECRET" "$SECRET" direct.7z | "$LA" --plain --no-color 7z bigdir >"$T/direct_secret.out" 2>&1 )
+    if [[ -s $T/bigparent/direct.7z ]] && ! grep -qaF -f <(printf '%s\n' "$SECRET") "$T/direct_secret.out"; then t_ok 'direct 7z argv route creates encrypted archive without printing password'; else t_bad 'direct 7z password route' "$(tail -n 5 "$T/direct_secret.out" | tr '\n' '|')"; fi
+    mkdir -p "$T/direct_unpack"; cp "$T/bigparent/direct.7z" "$T/direct_unpack/"
+    ( cd "$T/direct_unpack" && printf '%s\n' "$SECRET" 1 '' | "$LA" --plain --no-color unzip direct.7z >"$T/direct_extract.out" 2>&1 )
+    if cmp -s "$T/direct_unpack/direct/bigdir/big.bin" "$T/bigparent/bigdir/big.bin" && ! grep -qaF -f <(printf '%s\n' "$SECRET") "$T/direct_extract.out"; then t_ok 'direct unzip argv route decrypts without printing password'; else t_bad 'direct unzip password route' "$(tail -n 5 "$T/direct_extract.out" | tr '\n' '|')"; fi
+    # bash -x: the password must not appear in the xtrace output either
+    # (secret sections force xtrace off), neither on stderr nor via BASH_XTRACEFD.
+    mkdir -p "$T/xtr"; printf 'traced\n' > "$T/xtr/t.txt"
+    ( cd "$T/xtr" && printf '%s\n' 1 1 1 2 3 2 "$SECRET" "$SECRET" "" "" 3 | bash -x "$LA" --plain --no-color >"$T/xtrace.out" 2>&1 )
+    mkdir -p "$T/xtr2"; cp "$T/xtr/t.txt.7z" "$T/xtr2/" 2>/dev/null
+    ( cd "$T/xtr2" && printf '%s\n' 2 1 "$SECRET" 1 "" "" 3 | BASH_XTRACEFD=7 bash -x "$LA" --plain --no-color >"$T/xtrace2.out" 2>&1 7>"$T/xtrace2.fd" )
+    mkdir -p "$T/xtr_direct"; printf 'traced direct\n' > "$T/xtr_direct/t.txt"
+    ( cd "$T/xtr_direct" && printf '%s\n' 1 2 "$SECRET" "$SECRET" '' | bash -x "$LA" --plain 7z t.txt >"$T/xtrace_direct.out" 2>&1 )
+    if [[ -s $T/xtr_direct/t.txt.7z ]] && ! grep -qaF -f <(printf '%s\n' "$SECRET") "$T/xtrace_direct.out"; then t_ok 'direct 7z route: password absent from bash -x'; else t_bad 'direct password in xtrace' ''; fi
+    tlines=$(cat "$T/xtrace.out" "$T/xtrace2.fd" | grep -c '^+')
+    if [[ -s $T/xtr/t.txt.7z && $(cat "$T/xtr2/t.txt/t.txt" 2>/dev/null) == traced ]] && (( tlines > 1000 )); then
+        t_ok "bash -x runs: encrypted 7z created and extracted while tracing ($tlines trace lines captured)"
+    else t_bad "bash -x runs" "lines=$tlines $(tail -n 4 "$T/xtrace2.out" | tr '\n' '|')"; fi
+    # negative control: an ordinary traced bash DOES print such a value, so the grep below is meaningful
+    # (the value goes in through stdin: the argv poller is running right now)
+    ctl=$(printf '%s\n' "$SECRET" | bash -x -c 'read -r pw; [[ -n $pw ]]' 2>&1)
+    if grep -qaF -f <(printf '%s\n' "$SECRET") <<<"$ctl"; then t_ok "control: plain 'bash -x' would print the password (the xtrace check is effective)"; else t_bad "xtrace control" ""; fi
+    if ! grep -qaF -f <(printf '%s\n' "$SECRET") "$T/xtrace.out" "$T/xtrace2.out" "$T/xtrace2.fd"; then
+        t_ok "password NOT in the xtrace output (stderr trace and BASH_XTRACEFD file)"
+    else t_bad "xtrace leak" "$(grep -aF -m2 -f <(printf '%s\n' "$SECRET") "$T/xtrace.out" "$T/xtrace2.fd" | cut -c1-120)"; fi
+    if grep -q '^+* *secret_on' "$T/xtrace.out" && grep -q 'set +x' "$T/xtrace2.fd"; then t_ok "trace shows secret_on switching xtrace off before the password is handled"; else t_bad "secret_on in trace" ""; fi
+    rm -f "$T/xtrace.out" "$T/xtrace2.out" "$T/xtrace2.fd" "$T/xtrace_direct.out"
+    touch "$STOP"; wait "$PPID_POLL" 2>/dev/null
+    [[ -n ${PID_INO:-} ]] && kill "$PID_INO" 2>/dev/null
+    if [[ -s $SEEN ]]; then t_ok "poller really observed the 7z processes while they ran (the check is effective)"; else t_bad "poller effectiveness" "never saw a 7z process"; fi
+    if [[ ! -s $HITS ]]; then t_ok "password NOT in 'ps' args, /proc/*/cmdline or /proc/*/environ during create/extract (zip AES + 7z)"; else t_bad "argv/environ leak" "$(head -c 300 "$HITS")"; fi
+    hits=$(grep -rlaF -f <(printf '%s\n' "$SECRET") /tmp "$T" "$HOME" /var/tmp /dev/shm 2>/dev/null | grep -v -e "$HITS" -e '/leak\.')
+    if [[ -z $hits ]]; then t_ok "password NOT found in files under /tmp, /var/tmp, /dev/shm, \$HOME (incl. shell history) or the test folder"; else t_bad "password on disk" "$hits"; fi
+    if [[ -s $T/inotify.log ]]; then
+        tmpc=$(grep -c CREATE "$T/inotify.log")
+        t_ok "inotifywait watched $TMPDIR, /tmp, /var/tmp, /dev/shm during the runs: $tmpc file creations, none contains the password (scan above)"
+    fi
+    if ! cat ~/.bash_history ~/.zsh_history 2>/dev/null | grep -qaF -f <(printf '%s\n' "$SECRET"); then t_ok "no shell history file contains the password"; else t_bad "history leak" ""; fi
+    check "linux-archive temp dir removed after run" "leftover linux-archive.* in TMPDIR" bash -c "[[ -z \$(find '$T/tmp' -maxdepth 1 -name 'linux-archive.*' -print -quit) ]]"
+    # static: JOB_SECRET never exported, password never on a command line
+    if grep -q '^export -n JOB_SECRET' "$LA" && ! grep -qE 'export +JOB_SECRET|declare -x' "$LA"; then t_ok "JOB_SECRET is declared 'export -n' and never exported"; else t_bad "JOB_SECRET export" ""; fi
+    if ! grep -nE -e ' -P ?"?[$]' -e '-p"?[$][A-Za-z_{]' -e '--password' "$LA" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q .; then t_ok "code never builds a command line containing a password (-P \$pw / -p\$pw / --password)"; else t_bad "password on argv in code" ""; fi
+fi
 t_summary
 exit $(( FAIL > 0 ))

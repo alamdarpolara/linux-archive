@@ -195,5 +195,112 @@ if want matrix; then
     unzip_run "$T/we ird ex" none -
     if [[ $(cat "$T/we ird ex/my arc 'x'/f.txt" 2>/dev/null) == content ]]; then t_ok "extract an archive with spaces/quotes in its name -> folder 'my arc 'x''"; else t_bad "weird archive name" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
 fi
+
+# ------------------------------------------------------ extract-only formats
+mk_samples() {
+    local s=$T/samples ss=$T/ssrc
+    # Fix the umask so generated samples compare consistently across hosts
+    # (the invoking user's umask is often 0002).
+    rm -rf "$ss"
+    (
+        umask 022
+        mkdir -p "$ss/src/sub" "$ss/src/emptyd"
+        printf 'alpha\n' > "$ss/src/a.txt"; printf 'beta\n' > "$ss/src/sub/b.txt"; chmod 600 "$ss/src/sub/b.txt"
+        ln -s a.txt "$ss/src/lnk"
+    )
+    cd "$ss" || return 1
+    tar -cf "$s/s.tar" src
+    gzip -c "$s/s.tar" > "$s/s.tar.gz"; cp "$s/s.tar.gz" "$s/s.tgz"
+    bzip2 -c "$s/s.tar" > "$s/s.tar.bz2"
+    xz -c "$s/s.tar" > "$s/s.tar.xz"
+    zstd -q -c "$s/s.tar" > "$s/s.tar.zst"
+    lz4 -q -c "$s/s.tar" > "$s/s.tar.lz4"
+    xz --format=lzma -c "$s/s.tar" > "$s/s.tar.lzma"
+    for c in gz:gzip bz2:bzip2 xz:xz zst:zstd lz4:lz4 lzma:xz; do
+        ext=${c%%:*}
+        case $ext in
+            gz) gzip -c src/a.txt > "$s/single.txt.gz" ;;
+            bz2) bzip2 -c src/a.txt > "$s/single.txt.bz2" ;;
+            xz) xz -c src/a.txt > "$s/single.txt.xz" ;;
+            zst) zstd -q -c src/a.txt > "$s/single.txt.zst" ;;
+            lz4) lz4 -q -c src/a.txt > "$s/single.txt.lz4" ;;
+            lzma) xz --format=lzma -c src/a.txt > "$s/single.txt.lzma" ;;
+        esac
+    done
+    zip -q -r -y "$s/s.zip" src; cp "$s/s.zip" "$s/s.jar"; cp "$s/s.zip" "$s/s.war"; cp "$s/s.zip" "$s/s.apk"
+    (7zz a -snl -bd "$s/s.7z" src || 7z a -snl -bd "$s/s.7z" src) >/dev/null 2>&1
+    command -v xorriso >/dev/null && xorriso -as mkisofs -quiet -R -J -o "$s/s.iso" . >/dev/null 2>&1
+    mksquashfs src "$s/s.squashfs" -keep-as-directory -no-progress -noappend >/dev/null 2>&1
+    find src | cpio -o -H newc --quiet > "$s/s.cpio" 2>/dev/null
+    ar rcs "$s/s.a" src/a.txt src/sub/b.txt
+    command -v gcab >/dev/null && gcab -c "$s/s.cab" src/a.txt src/sub/b.txt >/dev/null 2>&1
+    mkdir -p "$T/debroot/DEBIAN" "$T/debroot/usr/share/la"
+    printf 'Package: la-test\nVersion: 1.0\nArchitecture: all\nMaintainer: t <t@example.org>\nDescription: t\n' > "$T/debroot/DEBIAN/control"
+    printf 'hi\n' > "$T/debroot/usr/share/la/f"
+    dpkg-deb --build "$T/debroot" "$s/s.deb" >/dev/null 2>&1
+    if command -v rpmbuild >/dev/null; then
+        mkdir -p "$T/rb"/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
+        cat > "$T/rb/SPECS/t.spec" <<'SPEC'
+Name: latest
+Version: 1.0
+Release: 1
+Summary: t
+License: MIT
+BuildArch: noarch
+%description
+t
+%install
+mkdir -p %{buildroot}/usr/share/latest
+echo hello > %{buildroot}/usr/share/latest/f.txt
+ln -s f.txt %{buildroot}/usr/share/latest/lnk
+%files
+/usr/share/latest
+SPEC
+        rpmbuild --define "_topdir $T/rb" -bb "$T/rb/SPECS/t.spec" >/dev/null 2>&1
+        cp "$T"/rb/RPMS/noarch/*.rpm "$s/s.rpm" 2>/dev/null
+    fi
+    cd "$T" || return 1
+}
+
+extract_sample() {   # extract_sample <file> -> $XD (dir with result)
+    local f=$1 b
+    b=${f##*/}
+    XD=$T/ex/sample_$b
+    rm -rf "$XD"; mkdir -p "$XD"; ln "$f" "$XD/$b" 2>/dev/null || cp "$f" "$XD/$b"
+    unzip_run "$XD" none -
+}
+
+if want extract; then
+    t_section "extract-only formats (real archives built with the real tools)"
+    mk_samples
+    for f in s.tar s.tar.gz s.tgz s.tar.bz2 s.tar.xz s.tar.zst s.tar.lz4 s.tar.lzma s.zip s.jar s.war s.apk s.7z s.iso s.squashfs s.cpio; do
+        id="extract $f"
+        if [[ ! -s $T/samples/$f ]]; then t_skip "$id" "sample could not be built here"; continue; fi
+        extract_sample "$T/samples/$f"
+        base=$(cd "$XD" && ls -d -- */ 2>/dev/null | head -n 1); base=${base%/}
+        if [[ -n $base && -d $XD/$base/src ]] && same_tree "$XD/$base/src" "$T/ssrc/src"; then t_ok "$id (names, modes, symlink, contents)"
+        else t_bad "$id" "rc=$LA_RC $(tail -n 6 "$LA_OUT" | tr '\n' '|')"; fi
+    done
+    for f in single.txt.gz single.txt.bz2 single.txt.xz single.txt.zst single.txt.lz4 single.txt.lzma; do
+        id="extract $f"
+        extract_sample "$T/samples/$f"
+        out="$XD/single.txt/single.txt"
+        if cmp -s "$out" "$T/ssrc/src/a.txt"; then t_ok "$id"; else t_bad "$id" "rc=$LA_RC $(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    done
+    # ar / cab / deb / rpm: different layouts
+    extract_sample "$T/samples/s.a"
+    if cmp -s "$XD/s/a.txt" "$T/ssrc/src/a.txt" && cmp -s "$XD/s/b.txt" "$T/ssrc/src/sub/b.txt"; then t_ok "extract s.a (ar)"; else t_bad "extract s.a (ar)" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    if [[ -s $T/samples/s.cab ]]; then
+        extract_sample "$T/samples/s.cab"
+        if cmp -s "$XD/s/src/a.txt" "$T/ssrc/src/a.txt" && cmp -s "$XD/s/src/sub/b.txt" "$T/ssrc/src/sub/b.txt"; then t_ok "extract s.cab"; else t_bad "extract s.cab" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    else t_skip "extract s.cab" "skipped: sample could not be built here (gcab unavailable or failed)"; fi
+    extract_sample "$T/samples/s.deb"
+    if [[ $(cat "$XD/s/usr/share/la/f" 2>/dev/null) == hi && -f $XD/s/DEBIAN/control ]]; then t_ok "extract s.deb (data + control)"; else t_bad "extract s.deb" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    if [[ -s $T/samples/s.rpm ]]; then
+        extract_sample "$T/samples/s.rpm"
+        if [[ $(cat "$XD/s/usr/share/latest/f.txt" 2>/dev/null) == hello && $(readlink "$XD/s/usr/share/latest/lnk") == f.txt ]]; then t_ok "extract s.rpm (file + symlink)"; else t_bad "extract s.rpm" "$(tail -n 5 "$LA_OUT" | tr '\n' '|')"; fi
+    else t_skip "extract s.rpm" "skipped: sample could not be built here (rpmbuild unavailable or failed)"; fi
+
+fi
 t_summary
 exit $(( FAIL > 0 ))

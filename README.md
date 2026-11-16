@@ -82,3 +82,28 @@ Exit codes:
 | 4 | Unsupported or unknown system |
 | 5 | Immutable system |
 | 6 | Package manager is busy (lock) or failing |
+
+### setup.sh / uninstall_setup.sh
+
+- **`sudo ./setup.sh [--yes]`** installs `/opt/linux-archive/linux-archive.sh` and creates
+  `/usr/local/bin/linux-archive` (the primary symlink) and `/usr/local/bin/larc`
+  (the short symlink). It also adds a marked interactive alias block for the
+  long name to the system-wide bash file and writes a manifest to
+  `/var/lib/linux-archive/manifest`: the installed script has a SHA-256 sum;
+  symlinks have fixed expected targets. Before creating `larc`, setup checks
+  `command -v larc` and the destination path. An existing foreign command or
+  file is never overwritten. Setup warns, installs everything else and records
+  the skipped alias as a collision in the manifest. To resolve one, inspect
+  the reported command, move or rename it yourself if appropriate, then rerun
+  `sudo ./setup.sh`. A matching symlink without prior manifest ownership is
+  also treated as foreign.
+- After installing, `setup.sh` checks that a new user's interactive bash
+  really sees the alias. The check runs under `setsid` (no controlling
+  terminal) with `timeout -k`, so it cannot hang on a real terminal.
+- **`sudo ./setup.sh --verify`**, **`linux-archive --verify`** or **`larc --verify`**
+  compare manifest-owned files and both symlink targets to the manifest.
+  A foreign `larc` collision is reported as skipped, **not** claimed as ours.
+- **`sudo ./uninstall_setup.sh [--dry-run] [--yes] [--remove-deps] [--keep-backup]`**
+  removes the installation and manifest-owned `larc` symlink only when it still
+  points at the recorded script; it leaves any foreign replacement untouched.
+  `sudo ./setup.sh --uninstall` runs the same thing.

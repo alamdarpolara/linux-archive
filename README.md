@@ -107,3 +107,54 @@ Exit codes:
   removes the installation and manifest-owned `larc` symlink only when it still
   points at the recorded script; it leaves any foreign replacement untouched.
   `sudo ./setup.sh --uninstall` runs the same thing.
+
+### Supported distributions
+
+These distributions were tested in containers. To verify the current revision,
+run the test matrix described under [Tests](#tests).
+
+| Family | Tested releases | Package manager | System bash file used for the alias |
+|---|---|---|---|
+| Debian | 12, 13 | apt | `/etc/bash.bashrc` |
+| Ubuntu | 22.04, 24.04, 26.04 | apt | `/etc/bash.bashrc` |
+| Fedora | 44 | dnf5 | `/etc/bashrc` |
+| RHEL rebuilds | Rocky 8 and 9, AlmaLinux 8, 9 and 10 (10: the official x86_64_v2 image) | dnf (+EPEL) | `/etc/bashrc` |
+| openSUSE | Leap 16.0, Tumbleweed | zypper | `/etc/bash.bashrc.local` |
+| Arch Linux | rolling | pacman | `/etc/bash.bashrc` |
+| Alpine | 3.24 | apk | `/etc/bash/bashrc` |
+
+Derivatives are recognised through `ID_LIKE` in `/etc/os-release` (Mint,
+Pop!_OS, Manjaro, EndeavourOS and others), but they were not tested. Unknown
+systems are refused and get a list of the tools they need. The minimum bash
+version is **4.4**, which is the bash of Rocky/Alma 8, the oldest tested
+system.
+
+Immutable or declarative systems are detected and refused with exit code 5:
+
+- NixOS
+- rpm-ostree / bootc images such as Silverblue, Kinoite and CoreOS (`/run/ostree-booted`)
+- Transactional openSUSE/SUSE such as MicroOS, Aeon and SLE Micro
+- Ubuntu Core
+- Any system with a read-only `/usr`
+
+`linux-archive.sh` itself still runs there if the tools exist.
+
+### Package names per distribution
+
+These names were verified with each package manager.
+
+| Tool | Debian/Ubuntu | Fedora | Rocky/Alma 8–9 | openSUSE | Arch | Alpine |
+|---|---|---|---|---|---|---|
+| 7-Zip | `7zip` (`p7zip-full` on old releases) | `7zip` | `p7zip` + `p7zip-plugins` (EPEL 8/9), `7zip` (EPEL 10) | `7zip` | `7zip` | `7zip` |
+| xz | `xz-utils` | `xz` | `xz` | `xz` | `xz` | `xz` |
+| squashfs | `squashfs-tools` | `squashfs-tools` | `squashfs-tools` | `squashfs` | `squashfs-tools` | `squashfs-tools` |
+| rpm2cpio | `rpm2cpio` | `rpm` | `rpm` | `rpm` | `rpm-tools` | `rpm2cpio` |
+| bsdtar | `libarchive-tools` | `bsdtar` | `bsdtar` | `bsdtar` | `libarchive` | `libarchive-tools` |
+| tput | `ncurses-bin` | `ncurses` | `ncurses` | `ncurses-utils` | `ncurses` | `ncurses` |
+| flock / setsid | `util-linux` | `util-linux` | `util-linux` | `util-linux` | `util-linux` | `flock` (setsid from BusyBox) |
+| cabextract, dpkg | `cabextract`, `dpkg` | same | same (EPEL) | same | same | same |
+| non-free unrar | `unrar` (non-free / multiverse) | `unrar` (RPM Fusion nonfree) | `unrar` (RPM Fusion nonfree EL) | `unrar` (non-oss) | `unrar` (`[extra]`) | not packaged |
+
+On Alpine, the BusyBox applets are replaced by the real tools: GNU tar,
+coreutils, findutils, grep, gzip and cpio, plus bzip2, xz, Info-ZIP unzip and
+util-linux flock. linux-archive uses options that the BusyBox versions lack.

@@ -320,3 +320,33 @@ Only official repositories are used.
   - **Real hosts with SELinux/AppArmor enforcing:** labels are copied with
     `chcon --reference` if SELinux is enabled.
   - **Real immutable systems:** only fake markers were tested.
+
+## Tests
+
+`linux-archive_test/run_all.sh` is not a deliverable. It builds one container
+image per distribution through the real `install.sh`, then runs:
+
+- the `install.sh` scenarios in fresh containers
+- the root suite: `setup.sh`, `uninstall_setup.sh`, locking, tampering,
+  disk-full and extraction as root
+- the main suite as an unprivileged user: every format × level × password,
+  extract-only formats, negative cases, security cases, password-leak proof,
+  and the pty-driven UI
+
+The root suite also runs `setup.sh` on a pseudo-terminal. Containers have no
+tty, so this is the only test that catches terminal-only hangs.
+
+```sh
+cd linux-archive_test
+./run_all.sh                       # all 15 distributions (see distros.sh)
+ONLY=debian13,arch ./run_all.sh    # a subset
+JOBS=2 ./run_all.sh                # distributions in parallel
+SKIP_BUILD=1 SKIP_INSTALL=1 ./run_all.sh   # reuse images, only root + main suites
+# also: SKIP_ROOT=1, SKIP_MAIN=1
+```
+
+It needs docker or podman and never installs them. Each run writes local
+`logs/<distro>.log` and `logs/SUMMARY.txt`; generated logs are not published.
+
+The full matrix has not been rerun since the latest two fixes (the cpio
+line-break check and the setup.sh pty test). Run it to verify this revision.

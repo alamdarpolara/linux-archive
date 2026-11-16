@@ -293,5 +293,83 @@ if [[ $out == *"$VER"* ]]; then t_ok "WITHOUT the symlink an interactive bash st
 else t_skip "alias-only interactive shell" "a new user's interactive bash does not read $RC by default here (the symlink is the primary entry point)"; fi
 bash "$SETUP" >/dev/null 2>&1
 check "setup.sh re-creates the symlink" "" bash -c '[[ $(readlink /usr/local/bin/linux-archive) == /opt/linux-archive/linux-archive.sh ]]'
+
+t_section "setup.sh / uninstall_setup.sh - safety checks"
+cp -p "$RC" $W/rc.good
+sed -i '/^# END linux-archive/d' "$RC"
+before=$(sha256sum < "$RC")
+out=$(bash "$SETUP" 2>&1); rc=$?
+if (( rc != 0 )) && [[ $before == "$(sha256sum < "$RC")" ]]; then t_ok "damaged marker block: install refuses and does not touch the file"; else t_bad "damaged markers" "rc=$rc"; fi
+out=$(bash "$UNINST" --yes 2>&1); rc=$?
+if (( rc != 0 )) && [[ $before == "$(sha256sum < "$RC")" ]]; then t_ok "damaged marker block: uninstall reports it (non-zero exit) and leaves $RC alone" "rc=$rc"; else t_bad "damaged marker block: uninstall reports it (non-zero exit) and leaves $RC alone" "rc=$rc"; fi
+cp -p $W/rc.good "$RC"
+bash "$SETUP" >/dev/null 2>&1
+# manifest mismatch cases: nothing in /opt/linux-archive may be deleted
+touch /opt/linux-archive/extra.conf
+out=$(bash "$UNINST" --yes 2>&1); rc=$?
+if (( rc == 1 )) && [[ -f /opt/linux-archive/linux-archive.sh && -f /opt/linux-archive/extra.conf ]] && grep -q 'unexpected entry' <<<"$out"; then t_ok "extra file in /opt/linux-archive: uninstall deletes NOTHING there, lists the difference, exit 1"; else t_bad "manifest mismatch (extra)" "rc=$rc $out"; fi
+rm -f /opt/linux-archive/extra.conf
+bash "$SETUP" >/dev/null 2>&1
+echo '# local change' >> /opt/linux-archive/linux-archive.sh
+out=$(bash "$UNINST" --yes 2>&1); rc=$?
+if (( rc == 1 )) && [[ -f /opt/linux-archive/linux-archive.sh ]] && grep -q 'SHA-256 differs' <<<"$out"; then t_ok "modified installed script: uninstall refuses to delete it (checksum differs), exit 1"; else t_bad "manifest mismatch (modified)" "rc=$rc $out"; fi
+bash "$SETUP" >/dev/null 2>&1
+mv /opt/linux-archive /opt/la-real; ln -s /opt/la-real /opt/linux-archive
+out=$(bash "$UNINST" --yes 2>&1); rc=$?
+if (( rc == 1 )) && [[ -f /opt/la-real/linux-archive.sh && -L /opt/linux-archive ]] && grep -q 'symbolic link' <<<"$out"; then t_ok "/opt/linux-archive replaced by a symlink: uninstall touches nothing behind it, exit 1"; else t_bad "manifest mismatch (symlink dir)" "rc=$rc $out"; fi
+rm -f /opt/linux-archive; mv /opt/la-real /opt/linux-archive
+out=$(bash "$SETUP" 2>&1); rc=$?
+mkdir -p /srv/elsewhere; rm -rf /opt/linux-archive; ln -s /srv/elsewhere /opt/linux-archive
+out=$(bash "$SETUP" 2>&1); rc=$?
+if (( rc != 0 )) && [[ ! -e /srv/elsewhere/linux-archive.sh ]]; then t_ok "setup.sh refuses to install through a symlinked /opt/linux-archive"; else t_bad "symlinked install dir" "rc=$rc"; fi
+rm -f /opt/linux-archive
+# foreign file at the symlink location
+rm -f /usr/local/bin/linux-archive; printf '#!/bin/sh\necho foreign\n' > /usr/local/bin/linux-archive; chmod 755 /usr/local/bin/linux-archive
+out=$(bash "$SETUP" 2>&1)
+if [[ ! -L /usr/local/bin/linux-archive ]] && grep -q 'not a symlink' <<<"$out"; then t_ok "a foreign file at /usr/local/bin/linux-archive is left alone (with a warning)"; else t_bad "foreign file" "$out"; fi
+bash "$UNINST" --yes >/dev/null 2>&1
+if [[ -f /usr/local/bin/linux-archive && ! -L /usr/local/bin/linux-archive ]]; then t_ok "uninstall also leaves that foreign file alone"; else t_bad "uninstall foreign file" ""; fi
+rm -f /usr/local/bin/linux-archive
+# a group-writable parent directory is refused
+bash "$SETUP" >/dev/null 2>&1; bash "$UNINST" --yes >/dev/null 2>&1
+chmod 775 /opt
+out=$(bash "$SETUP" 2>&1); rc=$?
+chmod 755 /opt
+if (( rc != 0 )) && grep -q 'group-writable' <<<"$out" && [[ ! -e /opt/linux-archive ]]; then t_ok "group-writable parent (/opt 775): setup.sh refuses"; else t_bad "parent permission check" "rc=$rc $out"; fi
+
+t_section "uninstall_setup.sh - dry run, uninstall, idempotency"
+bash "$SETUP" >/dev/null 2>&1
+out=$(bash "$UNINST" --dry-run 2>&1); rc=$?
+if (( rc == 0 )) && grep -q 'would' <<<"$out" && [[ -f /opt/linux-archive/linux-archive.sh && -L /usr/local/bin/linux-archive ]] && grep -q '^# BEGIN linux-archive' "$RC"; then t_ok "--dry-run lists the actions and changes nothing"; else t_bad "dry run" "rc=$rc"; fi
+out=$(bash "$UNINST" --yes 2>&1); rc=$?
+echo "$out" | sed 's/^/    | /'
+if (( rc == 0 )); then t_ok "uninstall exits 0"; else t_bad "uninstall rc" "$rc"; fi
+check "/opt/linux-archive is gone" "" bash -c '[[ ! -e /opt/linux-archive ]]'
+check "/usr/local/bin/linux-archive is gone" "" bash -c '[[ ! -e /usr/local/bin/linux-archive && ! -L /usr/local/bin/linux-archive ]]'
+check "/usr/local/bin/larc is gone" "" bash -c '[[ ! -e /usr/local/bin/larc && ! -L /usr/local/bin/larc ]]'
+check "manifest is gone" "" bash -c '[[ ! -e /var/lib/linux-archive/manifest ]]'
+if (( RC_EXISTED )); then
+    check "$RC is byte-identical to the original again" "" bash -c "[[ \$(sha256sum < $RC) == '$ORIG_HASH' ]]"
+else
+    check "$RC (created by setup.sh) is removed again" "" bash -c "[[ ! -e $RC ]]"
+fi
+check "no backup / temp files left next to $RC" "" bash -c "[[ -z \$(ls $RC.la-* $RC.linux-archive-* 2>/dev/null) ]]"
+check "lock file removed" "" bash -c '[[ ! -e /run/linux-archive-setup.lock && ! -e /var/lib/linux-archive-setup.lock ]]'
+out=$(bash "$UNINST" --yes 2>&1); rc=$?
+if (( rc == 0 )) && grep -qE 'Nothing to remove|Keeping /var/lib/linux-archive/installed-packages' <<<"$out"; then t_ok "second uninstall: exit 0, nothing (more) to remove"; else t_bad "second uninstall" "rc=$rc $out"; fi
+out=$(su tester -c "bash -i -c 'linux-archive --version'" 2>&1)
+if [[ $out != *"$VER"* ]]; then t_ok "after uninstall the command no longer exists"; else t_bad "command still present" ""; fi
+# a system bash file WITHOUT a trailing newline: setup adds one before the block,
+# uninstall must take exactly that newline away again (byte-identical result)
+if (( RC_EXISTED )); then
+    cp -p "$RC" $W/rc.keep
+    printf '# last line without newline' >> "$RC"
+    nonl=$(sha256sum < "$RC")
+    bash "$SETUP" >/dev/null 2>&1 && bash "$UNINST" --yes >/dev/null 2>&1
+    if [[ $(sha256sum < "$RC") == "$nonl" ]]; then t_ok "bash file without a trailing newline: setup + uninstall restore it byte-for-byte"; else t_bad "no-trailing-newline restore" "$(tail -c 60 "$RC" | od -c | tail -n 3 | tr '\n' ' ')"; fi
+    cp -p $W/rc.keep "$RC"
+fi
+out=$(bash "$SETUP" --uninstall --dry-run 2>&1); rc=$?
+if (( rc == 0 )); then t_ok "setup.sh --uninstall delegates to uninstall_setup.sh (options passed through)"; else t_bad "setup --uninstall" "rc=$rc $out"; fi
 t_summary
 exit $(( FAIL > 0 ))

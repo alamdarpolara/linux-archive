@@ -158,3 +158,32 @@ These names were verified with each package manager.
 On Alpine, the BusyBox applets are replaced by the real tools: GNU tar,
 coreutils, findutils, grep, gzip and cpio, plus bzip2, xz, Info-ZIP unzip and
 util-linux flock. linux-archive uses options that the BusyBox versions lack.
+
+## What it does
+
+### Zip
+
+1. Pick one item or several items. Names with spaces, Unicode, quotes, a
+   leading dash or newlines are all handled.
+2. Pick the format: zip, 7z, tar, tar.gz, tar.bz2, tar.xz, tar.zst or squashfs.
+   gz, xz and zst are also offered when exactly one regular file is selected.
+3. Pick a compression level, if the format has levels.
+4. Optionally set a password (zip and 7z only):
+   - **zip** uses AES-256 through 7-Zip. Weak ZipCrypto is never used.
+   - **7z** uses AES-256 and also encrypts the file names (`-mhe=on`).
+5. Choose what happens if the output exists: Overwrite, Rename or Skip.
+6. The archive is built in a private temporary folder, gets an integrity test,
+   and is then moved into place atomically.
+
+### Unzip
+
+1. Only real archives are shown. They are detected by `file` and by
+   magic-byte checks, so renamed archives are found too.
+2. Supported formats: zip, 7z, rar, tar, tar.gz/tgz, tar.bz2, tar.xz, tar.zst,
+   gz, bz2, xz, zst, lz4, lzma, iso, deb, rpm, cpio, ar/.a, cab, squashfs, jar,
+   war and apk.
+3. A password is asked for only when it is needed, including for header-encrypted
+   7z and RAR. You get 3 attempts.
+4. A preview and a safety scan run before anything is extracted.
+5. The archive is extracted into a new folder named after it, with Overwrite,
+   Rename or Skip if that folder exists.

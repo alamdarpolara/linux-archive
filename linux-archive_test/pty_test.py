@@ -278,3 +278,217 @@ ok = t.expect(r'Archive format')
 fr = t.last_frame()
 report(ok and 'gzip  (single file)' not in fr, 'pty: gz/xz/zst are NOT offered for a multiple selection', fr[:500])
 t.kill()
+
+# --------------------------------------------------------------- resize
+t = Term(d, rows=24, cols=80)
+t.expect(r'Main menu')
+t.expect(r'❯ Zip', since_mark=False)   # wait for the first full frame
+w1 = max((len(l) for l in strip(t.raw.decode('utf-8', 'replace')).split('\n') if l.startswith('╭')), default=0)
+t.mark = len(t.raw)
+t.resize(30, 60)
+ok = t.expect(r'╭─+╮', timeout=10)
+tops = re.findall(r'╭─+╮', t.since())
+w2 = len(tops[-1]) if tops else 0
+report(ok and w1 > w2 and w2 == 59, 'pty: terminal resize (SIGWINCH) re-draws the menu at the new width (%d -> %d)' % (w1, w2))
+t.mark = len(t.raw)
+t.resize(24, 100)
+t.expect(r'╭─+╮', timeout=10)
+tops = re.findall(r'╭─+╮', t.since())
+report(bool(tops) and len(tops[-1]) == 99, 'pty: growing the terminal re-draws wider (boxes capped at 100 columns)', 'width=%s' % (len(tops[-1]) if tops else None))
+t.kill()
+
+# ------------------------------------------------- numbered-menu fallback
+for label, kwargs in (('TERM=dumb', dict(env={'TERM': 'dumb'})), ('--plain', dict(args=['--plain']))):
+    t = Term(d, **kwargs)
+    ok = t.expect(r'Choose 1-3')
+    txt = t.text()
+    report(ok and '1) Zip' in txt and '\x1b[?25l' not in t.raw.decode('utf-8', 'replace'), 'pty: %s falls back to a numbered menu' % label, txt[-300:])
+    t.send(b'3\r')
+    t.wait_exit(4)
+    report(t.exit_code() == 0, 'pty: numbered menu works (3 = quit)')
+    t.kill()
+
+# ------------------------------------------- password typed hidden in the UI
+d = mkdir('hidden_pw')
+write(os.path.join(d, 'doc.txt'), b'some content\n' * 50)
+CANARY = 'Pty-Canary-7Zx91'
+t = Term(d)
+t.expect(r'Main menu'); t.send(ENTER)
+t.expect(r'Selection mode'); t.send(ENTER)
+t.expect(r'Choose the item'); t.send(ENTER)
+t.expect(r'Archive format'); t.send(DOWN); t.send(ENTER)   # 7z
+t.expect(r'Compression level'); t.send(ENTER)
+ok = t.expect(r'Password protection')
+t.send(DOWN); t.send(ENTER)
+ok = ok and t.expect(r'Enter password')
+t.send(CANARY + '\r', settle=0.3)
+ok = ok and t.expect(r'Repeat password')
+before = len(t.raw)
+t.send(CANARY + '\r', settle=0.3)
+ok = ok and t.expect(r'Archive name', timeout=8)
+t.send(ENTER, settle=0.3)
+ok = ok and t.expect(r'Archive created and verified', timeout=30)
+report(ok and os.path.exists(os.path.join(d, 'doc.txt.7z')), 'pty: 7z with password created through the TUI', t.since()[-300:])
+report(CANARY not in t.text(), 'pty: typed password is NOT echoed to the terminal (hidden input)')
+t.send(ENTER, settle=0.3)
+t.expect(r'Main menu'); t.send(b'q'); t.wait_exit(4)
+report(not zipinfo_leftovers(d), 'pty: no temp leftovers after a successful run')
+t.kill()
+
+# -------------------------------------------------- Ctrl+C during creation
+d = mkdir('ctrlc_create')
+if not os.path.exists(os.path.join(ROOT, 'big.bin')):
+    # base64 of random data: ~6 bits/byte entropy, slow for LZMA2 -mx=9 (a fast "all random" file would finish too soon)
+    os.system(f"head -c 60000000 /dev/urandom | base64 -w 76 > '{os.path.join(ROOT, 'big.bin')}'")
+os.link(os.path.join(ROOT, 'big.bin'), os.path.join(d, 'big.bin'))
+t = Term(d)
+t.expect(r'Main menu'); t.send(ENTER)
+t.expect(r'Selection mode'); t.send(ENTER)
+t.expect(r'Choose the item'); t.send(ENTER)
+t.expect(r'Archive format'); t.send(DOWN); t.send(ENTER)   # 7z
+t.expect(r'Compression level')
+for _ in range(2):
+    t.send(DOWN)      # Normal -> Maximum -> Ultra
+t.send(ENTER)
+t.expect(r'Password protection'); t.send(ENTER)
+t.expect(r'Archive name'); t.send_now(ENTER)
+started = t.expect(r'Creating big\.bin\.7z|Creating', timeout=15, settle=False)
+time.sleep(1.5)
+report(started and any(n.startswith('.linux-archive.') for n in os.listdir(d)), 'pty: archive creation is running (temp dir present) before Ctrl+C')
+t.send_now(CTRL_C, settle=0.2)
+done = t.wait_exit(15)
+txt = t.text()
+report(done and t.exit_code() == 130, 'pty: Ctrl+C during creation -> exit code 130', 'code=%s' % t.exit_code())
+report('Interrupted' in txt and 'partial archive was deleted' in txt, 'pty: Ctrl+C prints a clear "partial archive was deleted" message')
+left = sorted(os.listdir(d))
+report(left == ['big.bin'], 'pty: no partial archive and no temp folder remains after Ctrl+C', 'dir=%s' % left)
+lfl = termios.tcgetattr(t.fd)[3]
+report((lfl & termios.ECHO) and (lfl & termios.ICANON), 'pty: terminal modes (echo, canonical) are restored after Ctrl+C')
+report(t.raw.rfind(b'\x1b[?25h') > t.raw.rfind(b'\x1b[?25l'), 'pty: cursor is visible again after Ctrl+C')
+time.sleep(0.3)
+stale = os.popen("pgrep -f '7z[za]* a .*linux-archive' | head -n 3").read().strip()
+report(stale == '', 'pty: no stray 7z process survives Ctrl+C', stale)
+t.kill()
+
+# ------------------------------------------------- Ctrl+C during extraction
+d = mkdir('ctrlc_extract')
+big_tgz = os.path.join(ROOT, 'big.tar.gz')
+if not os.path.exists(big_tgz):
+    os.system(f"cd '{ROOT}' && head -c 300000000 /dev/urandom > big300.bin && tar -czf big.tar.gz big300.bin && rm -f big300.bin")
+os.link(big_tgz, os.path.join(d, 'big.tar.gz'))
+t = Term(d)
+t.expect(r'Main menu'); t.send(DOWN); t.send(ENTER)
+t.expect(r'Choose the archive'); t.send(ENTER)
+ok = t.expect(r'Next step', timeout=60)
+fr = t.last_frame()
+report(ok and 'Archive summary' in fr and 'big.tar.gz' in fr and 'Next step' in fr and 'Extract' in fr, 'pty: review screen shows the archive summary AND the Extract/Cancel menu together', fr[:500])
+t.send(ENTER)                                   # Extract
+t.expect(r'Extract into folder'); t.send_now(ENTER)
+started = t.expect(r'Extracting', timeout=20, settle=False)
+time.sleep(0.6)
+t.send_now(CTRL_C, settle=0.2)
+done = t.wait_exit(15)
+txt = t.text()
+report(started and done and t.exit_code() == 130, 'pty: Ctrl+C during extraction -> exit code 130', 'started=%s code=%s' % (started, t.exit_code()))
+report('Interrupted' in txt and 'partial extraction was deleted' in txt, 'pty: Ctrl+C prints "partial extraction was deleted"')
+left = sorted(os.listdir(d))
+report(left == ['big.tar.gz'], 'pty: no staging folder and no partial output remains after Ctrl+C', 'dir=%s' % left)
+lfl = termios.tcgetattr(t.fd)[3]
+report((lfl & termios.ECHO) and (lfl & termios.ICANON), 'pty: terminal modes restored after Ctrl+C during extraction')
+t.kill()
+
+# ----------------------------------------------------- Ctrl+C in a menu
+d = mkdir('ctrlc_menu')
+t = Term(d)
+t.expect(r'Main menu')
+t.send(CTRL_C, settle=0.3)
+t.wait_exit(5)
+lfl = termios.tcgetattr(t.fd)[3]
+report(t.exit_code() == 130 and (lfl & termios.ECHO) and (lfl & termios.ICANON) and t.raw.rfind(b'\x1b[?25h') > t.raw.rfind(b'\x1b[?25l'),
+       'pty: Ctrl+C inside a menu exits (130) and restores echo/canonical mode/cursor', 'code=%s' % t.exit_code())
+t.kill()
+
+# ----------------------------- notes stay visible next to menus (TUI repaint)
+d = mkdir('notes')
+write(os.path.join(d, 'doc.txt'), b'hello\n' * 100)
+os.system(f"""cd '{d}' && python3 - <<'PY2'
+import tarfile, io
+t = tarfile.open('links.tar', 'w')
+ti = tarfile.TarInfo('ok.txt'); ti.size = 3; t.addfile(ti, io.BytesIO(b'ok\\n'))
+ti = tarfile.TarInfo('abs_link'); ti.type = tarfile.SYMTYPE; ti.linkname = '/etc/hostname'; t.addfile(ti)
+t.close()
+PY2""")
+t = Term(d)
+t.expect(r'Main menu'); t.send(ENTER)
+t.expect(r'Selection mode'); t.send(ENTER)
+t.expect(r'Choose the item'); t.send(DOWN); t.send(ENTER)       # entries: doc.txt, links.tar -> links.tar
+ok = t.expect(r'Archive format')
+report(ok and 'Selected: links.tar' in t.last_frame(), 'pty: the "Selected: ..." note is visible together with the format menu', t.last_frame()[:300])
+t.send(DOWN); t.send(ENTER)    # 7z
+t.expect(r'Compression level'); t.send(ENTER)
+ok = t.expect(r'Password protection')
+fr = t.last_frame()
+report(ok and 'AES-256' in fr and 'file NAMES are encrypted' in fr, 'pty: the AES-256 / encrypted-names note is visible together with the password menu', fr[:400])
+t.kill()
+t = Term(d)
+t.expect(r'Main menu'); t.send(DOWN); t.send(ENTER)             # Unzip
+ok = t.expect(r'Choose the archive')
+t.send(ENTER)                                                   # links.tar
+ok = t.expect(r'Next step', timeout=15)
+fr = t.last_frame()
+report(ok and 'Archive summary' in fr and 'links.tar' in fr and 'First entries' in fr and 'abs_link' in fr, 'pty: review shows summary + first entries + menu on one screen', fr[:700])
+t.send(ENTER)                                                   # Extract
+t.expect(r'Extract into folder'); t.send(ENTER, settle=0.3)
+ok = t.expect(r'dangerous symlinks|point outside', timeout=15)
+ok = t.expect(r'Remove them', timeout=15) and ok    # the menu frame is drawn after the title
+fr = t.last_frame()
+report(ok and 'abs_link -> /etc/hostname' in fr and 'Remove them' in fr, 'pty: dangerous-symlink screen lists the links together with the Remove/Keep/Abort menu', fr[:600])
+t.send(ENTER)                                                   # Remove (default)
+t.expect(r'Extraction finished', timeout=10)
+t.send(ENTER, settle=0.3); t.expect(r'Main menu'); t.send(b'q'); t.wait_exit(4)
+report(os.path.isfile(os.path.join(d, 'links', 'ok.txt')) and not os.path.lexists(os.path.join(d, 'links', 'abs_link')), 'pty: choosing "Remove" in the TUI removed the dangerous symlink and kept the file')
+t.kill()
+
+# ------------------------------------------------ long list: scrolling
+d = mkdir('scroll')
+for i in range(60):
+    write(os.path.join(d, 'file%02d.txt' % i), b'x')
+t = Term(d, rows=24, cols=80)
+t.expect(r'Main menu'); t.send(ENTER)
+t.expect(r'Selection mode'); t.send(ENTER)
+ok = t.expect(r'Choose the item to compress')
+fr = t.last_frame()
+report(ok and 'of 60' in fr and 'file59.txt' not in fr and 'file00.txt' in fr, 'pty: a 60-entry list is windowed to the screen with a "n-m of 60" indicator', fr[:300])
+t.send(b'G')
+fr = t.last_frame()
+report('❯ file59.txt' in fr and 'file00.txt' not in fr, "pty: 'G'/End jumps to the last entry and scrolls the window", fr[:400])
+t.send(b'g')
+report('❯ file00.txt' in t.last_frame(), "pty: 'g'/Home jumps back to the first entry")
+t.send(b'\x1b[6~')
+report('❯ file' in t.last_frame() and '❯ file00.txt' not in t.last_frame(), 'pty: Page Down moves a page')
+t.send(UP)
+t.kill()
+
+# -------------------------------------------- NO_COLOR and a useless TERM
+d = mkdir('nocolor')
+t = Term(d, env={'NO_COLOR': '1'})
+t.expect(r'Main menu')
+t.expect(r'❯ Zip', since_mark=False)   # the menu frame is drawn after the title
+sgr = re.findall(rb'\x1b\[(?:3[0-7]|9[0-7]|4[0-7]|1;3[0-7])m', t.raw)
+report(not sgr and '❯ Zip' in t.text(), 'pty: NO_COLOR=1 -> no colour escape sequences, pointer glyph still marks the current item', str(sgr[:3]))
+t.send(b'q'); t.wait_exit(3); t.kill()
+t = Term(d, env={'TERM': ''})
+ok = t.expect(r'Choose 1-3')
+report(ok and '1) Zip' in t.text() and b'\x1b[?25l' not in t.raw, 'pty: empty TERM -> numbered-menu fallback (no cursor-control sequences)')
+t.send(b'3\r'); t.wait_exit(3); t.kill()
+
+# ----------------------------------------------- read-only folder message
+d = mkdir('readonly')
+os.chmod(d, 0o555)
+t = Term(d)
+t.expect(r'Main menu'); t.send(ENTER)
+report(t.expect(r'not writable'), 'pty: read-only folder -> clear "not writable" message instead of a crash')
+t.send(ENTER, settle=0.3); t.send(b'q'); t.wait_exit(4)
+t.kill()
+os.chmod(d, 0o755)
+print('PTY_DONE', flush=True)

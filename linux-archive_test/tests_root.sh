@@ -133,5 +133,92 @@ restore_manifest
 bash "$SETUP" --yes >/dev/null 2>&1
 bash "$UNINST" --yes >/dev/null 2>&1
 rm -f /usr/local/bin/larc /usr/local/bin/linux-archive
+
+t_section "setup.sh - install"
+out=$(bash "$SETUP" --yes 2>&1); rc=$?
+echo "$out" | sed 's/^/    | /'
+if (( rc == 0 )); then t_ok "setup.sh install exits 0"; else t_bad "setup.sh install" "rc=$rc"; fi
+if command -v script >/dev/null && command -v timeout >/dev/null; then
+    out=$(timeout -k 3 35 script -q -e -c "bash '$SETUP'" /dev/null 2>&1); rc=$?
+    if (( rc == 0 )) && grep -q 'Manifest written' <<<"$out" && bash "$SETUP" --verify >/dev/null 2>&1; then
+        t_ok 'setup.sh on a real pseudo-terminal completes without hanging; manifest verifies'
+    else t_bad 'setup.sh pseudo-terminal run' "rc=$rc $(tail -n 5 <<<"$out" | tr '\n' '|')"; fi
+else t_skip 'setup.sh pseudo-terminal run' 'script/timeout missing'; fi
+check "script installed as /opt/linux-archive/linux-archive.sh" "" test -f /opt/linux-archive/linux-archive.sh
+check "installed copy == source except the interpreter line" "" bash -c "cmp -s <(tail -n +2 '$LA') <(tail -n +2 /opt/linux-archive/linux-archive.sh)"
+ishb=$(head -n 1 /opt/linux-archive/linux-archive.sh)
+if [[ $ishb == '#!/bin/bash' || $ishb == '#!/usr/bin/bash' ]]; then t_ok "installed copy uses an absolute interpreter, not '/usr/bin/env bash'" "$ishb"; else t_bad "installed copy uses an absolute interpreter, not '/usr/bin/env bash'" "$ishb"; fi
+chk() { [[ $(stat -c '%U:%G %a' "$1") == "$2" ]]; }
+check "/opt/linux-archive is root:root 755" "$(stat -c '%U:%G %a' /opt/linux-archive)" chk /opt/linux-archive "root:root 755"
+check "/opt/linux-archive/linux-archive.sh is root:root 755" "$(stat -c '%U:%G %a' /opt/linux-archive/linux-archive.sh)" chk /opt/linux-archive/linux-archive.sh "root:root 755"
+check "no group/other write permission on the dir or the script" "" bash -c '[[ -z $(find /opt/linux-archive -perm /022) ]]'
+check "symlink /usr/local/bin/linux-archive -> /opt/linux-archive/linux-archive.sh" "" bash -c '[[ $(readlink /usr/local/bin/linux-archive) == /opt/linux-archive/linux-archive.sh ]]'
+check "symlink /usr/local/bin/larc -> /opt/linux-archive/linux-archive.sh" "" bash -c '[[ $(readlink /usr/local/bin/larc) == /opt/linux-archive/linux-archive.sh ]]'
+check "manifest records owned larc" "" grep -q $'^larc\t/usr/local/bin/larc\t/opt/linux-archive/linux-archive.sh\towned' /var/lib/linux-archive/manifest
+check "$RC has exactly one BEGIN and one END marker" "" bash -c "[[ \$(grep -c '^# BEGIN linux-archive' $RC) == 1 && \$(grep -c '^# END linux-archive' $RC) == 1 ]]"
+check "alias line present in $RC" "" grep -qx "alias linux-archive='/opt/linux-archive/linux-archive.sh'" "$RC"
+if (( RC_EXISTED )); then
+    check "$RC keeps its owner and mode ($ORIG_MODE)" "$(stat -c '%a %U:%G' "$RC")" bash -c "[[ \$(stat -c '%a %U:%G' $RC) == '$ORIG_MODE' ]]"
+fi
+check "manifest written (root:root 644) with dir/file/symlink/bashrc entries" "" bash -c "[[ \$(stat -c '%U:%G %a' /var/lib/linux-archive/manifest) == 'root:root 644' ]] && grep -q \$'^file\t/opt/linux-archive/linux-archive.sh\t' /var/lib/linux-archive/manifest && grep -q \$'^symlink\t' /var/lib/linux-archive/manifest && grep -q \$'^bashrc\t$RC' /var/lib/linux-archive/manifest"
+check "setup.sh --verify: OK right after install" "" bash "$SETUP" --verify
+check "linux-archive --verify (as a normal user): OK" "" su tester -c "/usr/local/bin/linux-archive --verify"
+check "larc --verify (as a normal user): OK" "" su tester -c "/usr/local/bin/larc --verify"
+out=$(su tester -c '/usr/local/bin/larc --help'); rc=$?
+if (( rc == 0 )) && grep -q '^Usage: larc ' <<<"$out"; then t_ok "larc help uses invoked name"; else t_bad "larc help" "rc=$rc $out"; fi
+rm -f /usr/local/bin/larc
+out=$(bash "$SETUP" --verify 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'larc' <<<"$out"; then t_ok "setup --verify detects missing larc"; else t_bad "larc missing verification" "rc=$rc $out"; fi
+out=$(su tester -c '/usr/local/bin/linux-archive --verify' 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'larc' <<<"$out"; then t_ok "linux-archive --verify detects missing larc"; else t_bad "larc missing tool verification" "rc=$rc $out"; fi
+bash "$SETUP" >/dev/null 2>&1
+check "setup re-creates missing larc" "" test -L /usr/local/bin/larc
+ln -sfn /tmp/foreign-alias /usr/local/bin/larc
+out=$(bash "$SETUP" --verify 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'larc' <<<"$out"; then t_ok "setup --verify detects retargeted larc"; else t_bad "larc retarget verification" "rc=$rc $out"; fi
+out=$(bash "$UNINST" --dry-run 2>&1)
+if [[ -L /usr/local/bin/larc ]] && grep -q 'larc' <<<"$out"; then t_ok "uninstall does not silently claim a retargeted larc"; else t_bad "larc foreign symlink safety" "$out"; fi
+rm -f /usr/local/bin/larc
+bash "$SETUP" >/dev/null 2>&1
+
+t_section "only root can modify; everybody can run"
+as_tester 'echo x >> /opt/linux-archive/linux-archive.sh' 2>/dev/null; rc=$?
+if (( rc != 0 )); then t_ok "normal user cannot append to the installed script"; else t_bad "tamper" "write succeeded"; fi
+as_tester 'touch /opt/linux-archive/evil' 2>/dev/null; rc=$?
+if (( rc != 0 )); then t_ok "normal user cannot create files in /opt/linux-archive"; else t_bad "tamper dir" "write succeeded"; fi
+as_tester 'rm -f /opt/linux-archive/linux-archive.sh' 2>/dev/null; rc=$?
+if (( rc != 0 )) && [[ -f /opt/linux-archive/linux-archive.sh ]]; then t_ok "normal user cannot delete the script"; else t_bad "tamper delete" ""; fi
+as_tester "ln -sfn /tmp/x /usr/local/bin/linux-archive" 2>/dev/null; rc=$?
+if (( rc != 0 )); then t_ok "normal user cannot replace the /usr/local/bin symlink"; else t_bad "symlink tamper" ""; fi
+check "normal user can execute it" "" bash -c "su tester -c '/usr/local/bin/linux-archive --version' | grep -q '^linux-archive '"
+# setpriv (util-linux) switches uid/gid directly - Arch's "nobody" account is
+# expired, so `su nobody` is refused there by PAM regardless of linux-archive.
+# (BusyBox setpriv on Alpine has no --reuid: fall back to su there.)
+if id nobody >/dev/null 2>&1; then
+    if setpriv --help 2>&1 | grep -q -- '--reuid'; then
+        check "other users (nobody) can execute it too" "" bash -c "cd / && setpriv --reuid=\$(id -u nobody) --regid=\$(id -g nobody) --clear-groups /opt/linux-archive/linux-archive.sh --version | grep -q '^linux-archive '"
+    else
+        check "other users (nobody) can execute it too" "" bash -c "cd / && su -s /bin/sh nobody -c '/opt/linux-archive/linux-archive.sh --version' | grep -q '^linux-archive '"
+    fi
+fi
+
+t_section "setup.sh - idempotent re-run, tamper detection"
+h1=$(sha256sum < "$RC"); m1=$(grep -v '^#' /var/lib/linux-archive/manifest)
+out=$(bash "$SETUP" 2>&1); rc=$?
+h2=$(sha256sum < "$RC"); m2=$(grep -v '^#' /var/lib/linux-archive/manifest)
+if (( rc == 0 )) && [[ $h1 == "$h2" && $m1 == "$m2" ]]; then t_ok "second run: exit 0, $RC byte-identical (no duplicate block), same manifest"; else t_bad "idempotent re-run" "rc=$rc"; fi
+bash "$SETUP" >/dev/null 2>&1; bash "$SETUP" >/dev/null 2>&1
+check "after 4 runs there is still exactly one block" "" bash -c "[[ \$(grep -c '^# BEGIN linux-archive' $RC) == 1 ]]"
+echo '# my own later line' >> "$RC"
+bash "$SETUP" >/dev/null 2>&1
+check "unrelated content added after the block survives a re-run" "" grep -qx '# my own later line' "$RC"
+sed -i '/^# my own later line$/d' "$RC"
+echo "echo tampered" >> /opt/linux-archive/linux-archive.sh
+out=$(bash "$SETUP" --verify 2>&1); rc=$?
+if (( rc != 0 )) && grep -q 'MODIFIED' <<<"$out"; then t_ok "setup.sh --verify detects a tampered script (non-zero exit)" "rc=$rc"; else t_bad "setup.sh --verify detects a tampered script (non-zero exit)" "rc=$rc $out"; fi
+out=$(su tester -c '/usr/local/bin/linux-archive --verify' 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'CHANGED' <<<"$out"; then t_ok "linux-archive --verify detects it too (exit 1)" "rc=$rc"; else t_bad "linux-archive --verify detects it too (exit 1)" "rc=$rc $out"; fi
+bash "$SETUP" >/dev/null 2>&1
+check "re-run restores the modified script; --verify OK again" "" bash "$SETUP" --verify
 t_summary
 exit $(( FAIL > 0 ))

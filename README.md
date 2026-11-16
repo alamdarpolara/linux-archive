@@ -279,3 +279,44 @@ util-linux flock. linux-archive uses options that the BusyBox versions lack.
 - The bash file is edited atomically, keeping its owner, mode and SELinux label.
 - `uninstall_setup.sh` deletes `/opt/linux-archive` only if it matches the
   manifest exactly. It never runs a blind `rm -rf`.
+
+### Repositories
+
+Only official repositories are used.
+
+- RPM Fusion's release packages are verified with the keys from the signed
+  `distribution-gpg-keys` package, instead of the documented `--nogpgcheck`.
+- EPEL comes from the distribution's own signed extras repository.
+
+## Known limitations
+
+- **RAR:** creating RAR is not supported (proprietary format and licence).
+  Encrypted RAR needs either the real `unrar` (non-free) or a 7-Zip build that
+  includes the RAR decoder, as on Arch. The free fallbacks (unar, unrar-free,
+  bsdtar/libarchive) only handle unencrypted RAR. libarchive older than 3.4 has
+  no RAR5 support at all; this affects Rocky/Alma 8.
+- **ZIP passwords** must be ASCII. 7-Zip limits this for ZIP AES; the 7z format
+  accepts any characters.
+- **Root** can always change the installed files. `--verify` only detects
+  changes after the fact.
+- **`sudo linux-archive`** needs `/usr/local/bin` in sudo's `secure_path`.
+  Otherwise use `sudo /usr/local/bin/linux-archive`. Running as root is
+  discouraged anyway.
+- **Old tool versions** that the tests met and that linux-archive handles:
+  - p7zip 16.02 (EPEL 8/9) asks for the password twice when creating, so it
+    gets it twice.
+  - 7-Zip before 22 (Ubuntu 22.04) skips absolute or escaping symlinks. The
+    skipped links are recreated inside the staging folder so that you decide
+    (remove or keep), just as with newer 7-Zip.
+  - squashfs-tools before 4.6 need `-f` to extract into the staging folder.
+  - squashfs-tools 4.3 has no `-quiet`, so it is only passed when supported.
+- **RPM Fusion's `unrar` for EL10** is built for x86-64-v3. On older CPUs it
+  does not run, so `install.sh` removes it again, removes RPM Fusion, and uses
+  bsdtar. This happened in the AlmaLinux 10 x86_64_v2 test.
+- **Not tested:**
+  - **Rocky Linux 10 and the official `almalinux:10` image:** they require
+    x86-64-v3, which the test host's CPU lacks. AlmaLinux 10 was tested
+    through its x86_64_v2 build.
+  - **Real hosts with SELinux/AppArmor enforcing:** labels are copied with
+    `chcon --reference` if SELinux is enabled.
+  - **Real immutable systems:** only fake markers were tested.

@@ -248,3 +248,34 @@ util-linux flock. linux-archive uses options that the BusyBox versions lack.
   - when running as root, ownership is reset to root
 - tar/bsdtar run with `--no-same-owner --no-same-permissions`.
 - Nested archives are never extracted automatically.
+
+### Environment and terminal
+
+- At start-up, linux-archive always sets a fixed `PATH` and removes these
+  variables:
+  - `BASH_ENV`, `ENV`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`
+  - the tools' option variables: `TAR_OPTIONS`, `GZIP`, `XZ_OPT`, `ZIPOPT`, `UNZIP`, …
+- `SHELLOPTS` and `BASHOPTS` are un-exported.
+- bash reads `BASH_ENV` and `SHELLOPTS` before the first line of any script
+  runs, so this protects the rest of the script and every child process. The
+  copy that `setup.sh` installs uses `#!/bin/bash`, so `env` never looks bash
+  up through `PATH`. `sudo` resets the environment.
+- File names and archive listings are sanitised before printing. Control
+  characters, escape sequences and bidi override characters become `?`.
+
+### Output files and concurrency
+
+- An output path that is a pre-created symlink is refused.
+- The final rename runs under a `flock` on the directory and uses `mv -T`. It
+  never writes through a symlink.
+- If two runs target the same name, they never clobber each other.
+
+### System files
+
+- `setup.sh` and `uninstall_setup.sh` take an exclusive lock
+  (`/run/linux-archive-setup.lock`), so they never run at the same time.
+- `setup.sh` refuses to install below a directory that is group- or
+  world-writable or not owned by root.
+- The bash file is edited atomically, keeping its owner, mode and SELinux label.
+- `uninstall_setup.sh` deletes `/opt/linux-archive` only if it matches the
+  manifest exactly. It never runs a blind `rm -rf`.

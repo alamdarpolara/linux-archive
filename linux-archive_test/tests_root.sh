@@ -220,5 +220,78 @@ out=$(su tester -c '/usr/local/bin/linux-archive --verify' 2>&1); rc=$?
 if (( rc == 1 )) && grep -q 'CHANGED' <<<"$out"; then t_ok "linux-archive --verify detects it too (exit 1)" "rc=$rc"; else t_bad "linux-archive --verify detects it too (exit 1)" "rc=$rc $out"; fi
 bash "$SETUP" >/dev/null 2>&1
 check "re-run restores the modified script; --verify OK again" "" bash "$SETUP" --verify
+
+t_section "locking: no concurrent setup/uninstall"
+LOCKF=/run/linux-archive-setup.lock; [[ -d /run ]] || LOCKF=/var/lib/linux-archive-setup.lock
+# The holder takes the lock, then signals readiness through a file and keeps
+# the lock until the test releases it (no sleep-based timing; the loops below
+# only wait for those signals, with generous safety limits).
+rm -f -- "$W/lock.ready" "$W/lock.release"
+( flock -x 8; : >"$W/lock.ready"
+  for (( j = 0; j < 1200; j++ )); do [[ -e $W/lock.release ]] && break; sleep 0.1; done ) 8>>"$LOCKF" &
+lpid=$!
+for (( j = 0; j < 300; j++ )); do [[ -e $W/lock.ready ]] && break; sleep 0.1; done
+if [[ -e $W/lock.ready ]]; then
+    out=$(bash "$SETUP" 2>&1); rc1=$?
+    out2=$(bash "$UNINST" --yes 2>&1); rc2=$?
+else out="" out2="" rc1=-1 rc2=-1; fi
+: >"$W/lock.release"
+wait "$lpid"
+if (( rc1 == 6 && rc2 == 6 )) && grep -q 'Another setup.sh' <<<"$out" && [[ -f /opt/linux-archive/linux-archive.sh ]]; then t_ok "while another run holds the lock: setup.sh and uninstall_setup.sh refuse at once (exit 6), nothing changed" "rc=$rc1/$rc2"; else t_bad "while another run holds the lock: setup.sh and uninstall_setup.sh refuse at once (exit 6), nothing changed" "lock holder ready: $([[ -e $W/lock.ready ]] && echo yes || echo NO); rc=$rc1/$rc2 $out $out2"; fi
+( bash "$SETUP" >$W/s1 2>&1; echo $? >$W/s1.rc ) & ( bash "$SETUP" >$W/s2 2>&1; echo $? >$W/s2.rc ) & wait
+r1=$(cat $W/s1.rc) r2=$(cat $W/s2.rc)
+if { (( r1 == 0 && r2 == 6 )) || (( r1 == 6 && r2 == 0 )) || (( r1 == 0 && r2 == 0 )); } && [[ $(grep -c '^# BEGIN linux-archive' "$RC") == 1 ]] && bash "$SETUP" --verify >/dev/null 2>&1; then
+    t_ok "two setup.sh started together: no corruption (one block, verify OK)" "exit codes $r1/$r2"
+else t_bad "two setup.sh started together: no corruption (one block, verify OK)" "exit codes $r1/$r2"; fi
+
+t_section "the command works: fresh interactive login shell, non-interactive shells, sudo"
+cat > $W/login.exp <<EOF
+set timeout 20
+spawn su - tester
+expect -re {[\$#] $}
+send "type linux-archive\r"
+expect "aliased to"
+send "mkdir -p /tmp/rt/wd && cd /tmp/rt/wd && echo hi > f.txt\r"
+expect -re {[\$#] $}
+send "linux-archive --version\r"
+expect "$VER"
+send "linux-archive\r"
+expect "Main menu"
+expect "folder: /tmp/rt/wd"
+send "q"
+expect "Bye!"
+expect -re {[\$#] $}
+send "exit\r"
+expect eof
+EOF
+if command -v expect >/dev/null; then
+    out=$(expect $W/login.exp 2>&1); rc=$?
+    if (( rc == 0 )) && grep -q 'aliased to' <<<"$out" && grep -q 'folder: /tmp/rt/wd' <<<"$out"; then t_ok "fresh interactive LOGIN shell: 'linux-archive' is an alias, starts, and shows the CURRENT folder"
+    else
+        # Some distributions' skeleton .bashrc does not read the system file in a login shell:
+        if grep -q 'folder: /tmp/rt/wd' <<<"$out"; then t_ok "fresh interactive LOGIN shell: the command starts in the CURRENT folder (via /usr/local/bin; the alias is not loaded in login shells here)"
+        else t_bad "login shell" "$(echo "$out" | tail -n 8 | tr '\n' '|')"; fi
+    fi
+else t_skip "login shell via expect" "expect not available"; fi
+out=$(su tester -c 'linux-archive --version' 2>&1); [[ $out == "$VER" ]] && t_ok "non-interactive 'su user -c linux-archive' works (symlink in /usr/local/bin)" || t_bad "non-interactive via symlink" "$out"
+out=$(su tester -c "sh -c 'cd /tmp && linux-archive --version'" 2>&1); [[ $out == "$VER" ]] && t_ok "'sh -c linux-archive' works" || t_bad "sh -c" "$out"
+out=$(su tester -c "bash -c 'cd /tmp && linux-archive --version'" 2>&1); [[ $out == "$VER" ]] && t_ok "'bash -c linux-archive' in another directory works" || t_bad "bash -c" "$out"
+if command -v sudo >/dev/null; then
+    out=$(su tester -c 'sudo linux-archive --version' 2>&1)
+    if [[ $out == "$VER" ]]; then t_ok "'sudo linux-archive' works (sudo ignores aliases; /usr/local/bin is in secure_path here)"
+    else
+        out2=$(su tester -c 'sudo /usr/local/bin/linux-archive --version' 2>&1)
+        if [[ $out2 == "$VER" ]]; then t_ok "'sudo linux-archive' is not found (secure_path lacks /usr/local/bin on this distro) - 'sudo /usr/local/bin/linux-archive' works (documented)"
+        else t_bad "sudo" "$out | $out2"; fi
+    fi
+fi
+rm -f /usr/local/bin/linux-archive
+out=$(su tester -c "bash -c 'linux-archive --version'" 2>&1); rc=$?
+if (( rc != 0 )); then t_ok "WITHOUT the symlink a non-interactive shell cannot find linux-archive (so the symlink is required)"; else t_bad "symlink necessity" "rc=$rc $out"; fi
+out=$(su tester -c "bash -i -c 'linux-archive --version'" 2>&1)
+if [[ $out == *"$VER"* ]]; then t_ok "WITHOUT the symlink an interactive bash still works through the alias in $RC"
+else t_skip "alias-only interactive shell" "a new user's interactive bash does not read $RC by default here (the symlink is the primary entry point)"; fi
+bash "$SETUP" >/dev/null 2>&1
+check "setup.sh re-creates the symlink" "" bash -c '[[ $(readlink /usr/local/bin/linux-archive) == /opt/linux-archive/linux-archive.sh ]]'
 t_summary
 exit $(( FAIL > 0 ))

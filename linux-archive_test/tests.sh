@@ -739,5 +739,21 @@ if want leak; then
     if grep -q '^export -n JOB_SECRET' "$LA" && ! grep -qE 'export +JOB_SECRET|declare -x' "$LA"; then t_ok "JOB_SECRET is declared 'export -n' and never exported"; else t_bad "JOB_SECRET export" ""; fi
     if ! grep -nE -e ' -P ?"?[$]' -e '-p"?[$][A-Za-z_{]' -e '--password' "$LA" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q .; then t_ok "code never builds a command line containing a password (-P \$pw / -p\$pw / --password)"; else t_bad "password on argv in code" ""; fi
 fi
+
+# -------------------------------------------------------------------- pty
+if want pty; then
+    t_section "interactive UI through a real pty (arrow keys, space, back/quit, resize, Ctrl+C)"
+    PTY_OUT=$(python3 "$HERE/pty_test.py" "$LA" "$T/pty" 2>&1)
+    echo "$PTY_OUT"
+    while IFS= read -r line; do
+        case $line in
+            PASS*) PASS=$((PASS+1)) ;;
+            FAIL*) FAIL=$((FAIL+1)); FAILED_NAMES+=("${line#FAIL  }") ;;
+            SKIP*) SKIP=$((SKIP+1)) ;;
+        esac
+    done <<<"$PTY_OUT"
+    if grep -q '^PTY_DONE' <<<"$PTY_OUT"; then t_ok "pty driver ran to the end"; else t_bad "pty driver crashed or stopped early" "$(tail -n 3 <<<"$PTY_OUT" | tr '\n' '|')"; fi
+fi
+
 t_summary
 exit $(( FAIL > 0 ))

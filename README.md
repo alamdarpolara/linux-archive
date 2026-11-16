@@ -219,3 +219,32 @@ util-linux flock. linux-archive uses options that the BusyBox versions lack.
   - `bsdtar --passphrase`
 
 ### Extraction
+
+- Files are extracted into a private staging folder (mode 0700) inside the
+  destination filesystem. It is checked and only then moved into place.
+- Before extraction, these are refused:
+  - absolute paths and `..` members
+  - members stored below a symlink of the same archive
+  - hard links with `..` targets
+  - cpio and rpm archives whose listing contains a member name with a line
+    break, or any other line that is not a listing record (GNU cpio prints
+    names raw, so `x<LF>/../../etc/p` would otherwise list as two harmless
+    lines). Such stray lines are also checked as paths for every format.
+- These limits are hard:
+  - more than 64 GiB declared size
+  - more than 1,000,000 members
+  - a compression ratio of 1000:1 or more when the result is 1 GiB or larger
+  - not enough free disk space
+- A ratio of 100:1 or more with at least 50 MiB unpacked gets a warning only.
+- A watchdog stops any extraction that grows beyond what the archive declared
+  or what the disk can hold.
+- Listing runs have a 15-minute timeout.
+- After extraction:
+  - symlinks that point outside the folder are reported, then removed or kept
+    as you choose
+  - hard links to files outside the folder abort the extraction
+  - device nodes, FIFOs and sockets are deleted
+  - setuid, setgid and sticky bits and world-write permission are stripped
+  - when running as root, ownership is reset to root
+- tar/bsdtar run with `--no-same-owner --no-same-permissions`.
+- Nested archives are never extracted automatically.

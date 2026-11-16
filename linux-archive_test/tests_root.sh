@@ -371,5 +371,153 @@ if (( RC_EXISTED )); then
 fi
 out=$(bash "$SETUP" --uninstall --dry-run 2>&1); rc=$?
 if (( rc == 0 )); then t_ok "setup.sh --uninstall delegates to uninstall_setup.sh (options passed through)"; else t_bad "setup --uninstall" "rc=$rc $out"; fi
+
+# ------------------------------------------------------ extraction as root
+t_section "extraction as root: device nodes, setuid, foreign owners"
+X=$W/rootx; mkdir -p "$X"
+python3 - "$X/dev.tar" <<'PY'
+import sys, tarfile, io
+t = tarfile.open(sys.argv[1], 'w')
+ti = tarfile.TarInfo('ok.txt'); ti.size = 3; t.addfile(ti, io.BytesIO(b'ok\n'))
+ti = tarfile.TarInfo('null2'); ti.type = tarfile.CHRTYPE; ti.devmajor = 1; ti.devminor = 3; ti.mode = 0o666; t.addfile(ti)
+ti = tarfile.TarInfo('fifo'); ti.type = tarfile.FIFOTYPE; t.addfile(ti)
+ti = tarfile.TarInfo('suid'); ti.size = 3; ti.mode = 0o4755; ti.uid = 4242; ti.gid = 4242; t.addfile(ti, io.BytesIO(b'#!\n'))
+ti = tarfile.TarInfo('ww'); ti.size = 3; ti.mode = 0o666; t.addfile(ti, io.BytesIO(b'ww\n'))
+t.close()
+PY
+( cd "$X" && printf '%s\n' 2 1 1 "" "" 3 | "$LA" --plain --no-color > $W/rootx.out 2>&1 )
+if grep -q 'Running as ROOT' $W/rootx.out; then t_ok "running as root shows a clear warning"; else t_bad "root warning" ""; fi
+if [[ -f $X/dev/ok.txt && ! -e $X/dev/null2 && ! -e $X/dev/fifo ]] && grep -q 'device/FIFO/socket' $W/rootx.out; then t_ok "device node and FIFO from a tar are NOT created (warned before, removed after)"; else t_bad "device nodes as root" "$(ls -la "$X/dev" 2>&1 | tr '\n' '|')"; fi
+m=$(stat -c '%a %u:%g' "$X/dev/suid" 2>/dev/null)
+if [[ -n $m && $m != 4* && ${m#* } == 0:0 ]]; then t_ok "setuid bit stripped and foreign owner (4242) replaced by root:root" "mode/owner: $m"; else t_bad "setuid bit stripped and foreign owner (4242) replaced by root:root" "mode/owner: $m"; fi
+w=$(stat -c %a "$X/dev/ww" 2>/dev/null)
+if [[ -n $w && ${w: -1} != [2367] ]]; then t_ok "world-writable mode from the archive not kept" "mode: $w"; else t_bad "world-writable mode from the archive not kept" "mode: $w"; fi
+
+# ------------------------------------------------- missing tools (renamed)
+t_section "missing tools: clear message + install.sh hint (binaries hidden temporarily)"
+# Hide the real binary - but never the target of a multi-call binary (Alpine's
+# coreutils, BusyBox): there the command's own symlink is moved instead.
+hide() {
+    local p r
+    p=$(command -v "$1") || return 0
+    r=$(readlink -f "$p")
+    [[ ${r##*/} == "$1" ]] || r=$p
+    mv "$r" "$r.la-hidden" && echo "$r" >> $W/hidden
+}
+unhide() { local p; [[ -f $W/hidden ]] || return 0; while read -r p; do mv "$p.la-hidden" "$p"; done < $W/hidden; rm -f $W/hidden; }
+M=$W/miss; mkdir -p "$M"; echo data > "$M/f.txt"; chown -R tester "$M"
+hide zstd
+out=$(cd "$M" && printf '%s\n' 1 1 1 7 q q q 3 | su tester -c "$LA --plain --no-color" 2>&1)
+unhide
+if grep -q 'zstd missing' <<<"$out" && grep -q 'Missing tool(s): zstd' <<<"$out" && grep -q 'install.sh' <<<"$out"; then t_ok "missing zstd: marked in the format menu, clear message + install.sh hint"; else t_bad "missing tool message" "$(tail -n 8 <<<"$out" | tr '\n' '|')"; fi
+for b in 7zz 7z 7za; do hide "$b"; done
+out=$(cd "$M" && printf '%s\n' 1 1 1 1 4 2 q q q q 3 | su tester -c "$LA --plain --no-color" 2>&1)
+unhide
+if grep -q '7-Zip is needed for password protection' <<<"$out" && [[ ! -e $M/f.txt.zip ]]; then t_ok "no 7-Zip: password zip refused (no silent fallback to weak ZipCrypto via argv)"; else t_bad "no 7z password refusal" "$(tail -n 8 <<<"$out" | tr '\n' '|')"; fi
+hide realpath
+out=$(cd "$M" && su tester -c "$LA --plain --no-color" </dev/null 2>&1); rc=$?
+unhide
+if (( rc == 1 )) && grep -q 'realpath -m' <<<"$out"; then t_ok "GNU realpath missing: refuses to start with a clear list (no silent weaker checks)"; else t_bad "GNU check" "rc=$rc $out"; fi
+# RAR without the non-free tool: hide unrar (and unar/unrar-free) -> 7-Zip RAR codec or bsdtar
+RS=$HERE/samples/rar_dl
+if [[ ! -s $RS/test_read_format_rar5_encrypted_filenames.rar ]]; then
+    t_skip "no unrar: encrypted RAR fallback" "skipped: fixture not present"
+else
+    for b in unrar unrar-nonfree unar lsar unrar-free; do hide "$b"; done
+    R=$W/rarfb; mkdir -p "$R"; cp "$RS/test_read_format_rar5_encrypted_filenames.rar" "$R/"; chown -R tester "$R"
+    out=$(cd "$R" && printf '%s\n' 2 1 password 1 "" "" 3 | su tester -c "$LA --plain --no-color" 2>&1)
+    backend=$(su tester -c "$LA --check" | grep '^  \[ok\] *RAR' )
+    unhide
+    echo "    RAR backend without unrar: $backend"
+    if [[ $backend == *"7-Zip RAR decoder"* ]]; then
+        if [[ $(find "$R" -type f ! -name '*.rar' | wc -l) == 4 ]]; then t_ok "no unrar: 7-Zip's RAR decoder extracts a header-encrypted RAR5 (password via stdin)"; else t_bad "7z RAR backend" "$(tail -n 6 <<<"$out" | tr '\n' '|')"; fi
+    else
+        if [[ -z $(find "$R" -type f ! -name '*.rar' -print -quit) ]] && grep -qE 'cannot|not use it|not supported' <<<"$out" && no_leftovers "$R"; then t_ok "no unrar: encrypted RAR refused honestly by the free fallback, nothing left" "backend: $backend"; else t_bad "no unrar: encrypted RAR refused honestly by the free fallback, nothing left" "backend: $backend; $(tail -n 6 <<<"$out" | tr '\n' '|')"; fi
+    fi
+fi
+
+# ----------------------------------------------------- disk-full simulation
+t_section "disk-full simulation (tmpfs)"
+mkdir -p /mnt/small
+la_as() {   # la_as <cwd> answers... : run linux-archive as 'tester' in plain mode
+    local cwd=$1; shift
+    printf '%s\n' "$@" > $W/answers
+    chmod 644 $W/answers
+    su tester -c "cd '$cwd' && '$LA' --plain --no-color < $W/answers" > $W/out.txt 2>&1
+}
+if mount -t tmpfs -o size=24m tmpfs /mnt/small 2>/dev/null; then
+    chown tester /mnt/small
+    su tester -c "head -c 14000000 /dev/urandom > /mnt/small/rand.bin"
+    la_as /mnt/small 1 1 1 1 4 1 "" "" 3
+    if grep -q 'failed' $W/out.txt && [[ ! -e /mnt/small/rand.bin.zip ]] && no_leftovers /mnt/small && [[ -s /mnt/small/rand.bin ]]; then t_ok "disk full while CREATING: clear error, partial archive deleted, source untouched"; else t_bad "disk-full create" "$(tail -n 8 $W/out.txt | tr '\n' '|') $(ls -A /mnt/small | tr '\n' ' ')"; fi
+    rm -f /mnt/small/rand.bin
+    su tester -c "cd /mnt/small && head -c 314572800 /dev/zero | zip -q -9 big.zip -"
+    la_as /mnt/small 2 1 3
+    if grep -q 'Not enough free disk space' $W/out.txt && grep -q 'Extraction refused' $W/out.txt && no_leftovers /mnt/small && [[ ! -d /mnt/small/big ]]; then t_ok "declared size > free disk space: refused up front (no bytes written)"; else t_bad "disk-full declared" "$(tail -n 8 $W/out.txt | tr '\n' '|')"; fi
+    rm -f /mnt/small/big.zip
+    su tester -c "cd /mnt/small && head -c 314572800 /dev/zero | gzip -9 > bomb.txt.gz"
+    la_as /mnt/small 2 1 1 "" "" 3
+    used=$(df -P -k /mnt/small | tail -n 1 | awk '{print $3}')
+    if grep -q 'Extraction stopped' $W/out.txt && grep -q 'ZIP BOMB' $W/out.txt && no_leftovers /mnt/small && [[ ! -d /mnt/small/bomb.txt ]] && (( used < 2000 )); then t_ok "decompression bomb with unknown size: watchdog aborts, staging deleted, disk space freed again"; else t_bad "watchdog" "used=${used}K $(tail -n 8 $W/out.txt | tr '\n' '|')"; fi
+    umount /mnt/small
+    if mount -t tmpfs -o size=700m tmpfs /mnt/small 2>/dev/null; then
+        chown tester /mnt/small
+        su tester -c "cd /mnt/small && head -c 1200000000 /dev/zero | bzip2 -9 > bomb2.txt.bz2"
+        la_as /mnt/small 2 1 1 "" "" 3
+        used=$(df -P -k /mnt/small | tail -n 1 | awk '{print $3}')
+        if grep -qE 'grew beyond|disk is full' $W/out.txt && no_leftovers /mnt/small && (( used < 2000 )); then t_ok "bzip2 bomb on a 700 MB disk: stopped, staging deleted, space freed" "stopped by: $(grep -oE 'grew beyond|disk is full' $W/out.txt | head -1)"
+        else t_bad "bzip2 bomb on a 700 MB disk: stopped, staging deleted, space freed" "used=${used}K $(grep -E 'Extraction|ZIP BOMB' $W/out.txt | head -n 2 | tr '\n' '|')"; fi
+        umount /mnt/small
+    else t_skip "watchdog (bzip2, 700 MB tmpfs)" "mount failed"; fi
+else
+    t_skip "disk-full simulation" "cannot mount tmpfs here (the container needs CAP_SYS_ADMIN, e.g. docker run --cap-add SYS_ADMIN)"
+fi
+
+t_section "lying-header zip bomb (declared size far below the real size)"
+mkdir -p $W/lie; chown tester $W/lie
+python3 - $W/lie <<'PY'
+import sys, zipfile, struct
+d = sys.argv[1]
+z = zipfile.ZipFile(d + '/lie.zip', 'w', zipfile.ZIP_DEFLATED)
+z.writestr('zeros.bin', bytes(120 * 1024 * 1024))
+z.close()
+b = bytearray(open(d + '/lie.zip', 'rb').read())
+lh = b.find(b'PK\x03\x04'); struct.pack_into('<I', b, lh + 22, 1024)
+cd = b.find(b'PK\x01\x02');  struct.pack_into('<I', b, cd + 24, 1024)
+open(d + '/lie.zip', 'wb').write(b)
+PY
+chown tester $W/lie/lie.zip
+la_as $W/lie 2 1 1 "" "" 3
+left=$(du -s -k $W/lie | cut -f1)
+if no_leftovers $W/lie && [[ ! -d $W/lie/lie ]] && (( left < 5000 )); then t_ok "lying header: nothing usable is left behind" "outcome: $(grep -oE 'Extraction stopped|Extraction failed|damaged|ZIP BOMB' $W/out.txt | head -n 1)"; else t_bad "lying header: nothing usable is left behind" "left=${left}K $(tail -n 8 $W/out.txt | tr '\n' '|')"; fi
+
+# ------------------------------------------- --remove-deps (only recorded packages)
+t_section "uninstall_setup.sh --remove-deps"
+if [[ -s /var/lib/linux-archive/installed-packages ]]; then
+    rec=$(tr '\n' ' ' < /var/lib/linux-archive/installed-packages)
+    echo "    recorded by install.sh: $rec"
+    # By family, not by "which tool exists": EPEL's dpkg also ships dpkg-query on RHEL clones.
+    pm_has() {
+        case " $ID ${ID_LIKE:-} " in
+            *" debian "*|*" ubuntu "*) dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null | grep -qx installed ;;
+            *" arch "*) pacman -Qq "$1" >/dev/null 2>&1 ;;
+            *" alpine "*) apk info -e "$1" >/dev/null 2>&1 ;;
+            *) rpm -q "$1" >/dev/null 2>&1 ;;
+        esac
+    }
+    bash "$SETUP" >/dev/null 2>&1
+    pre_bash=0; pm_has bash && pre_bash=1
+    out=$(bash "$UNINST" --yes --remove-deps 2>&1); rc=$?
+    echo "$out" | tail -n 12 | sed 's/^/    | /'
+    left=""; removed=""
+    for p in $rec; do if pm_has "$p"; then left+=" $p"; else removed+=" $p"; fi; done
+    echo "    removed:${removed:- none}   still installed:${left:- none}"
+    if (( pre_bash )) && pm_has bash; then t_ok "--remove-deps never removes core packages (bash still installed)"; else t_bad "core package removed" ""; fi
+    if [[ -n $removed ]] || grep -qE 'would also remove|depend on' <<<"$out"; then t_ok "--remove-deps removed only recorded packages or refused collateral removals" "rc=$rc"; else t_bad "--remove-deps removed only recorded packages or refused collateral removals" "rc=$rc"; fi
+    check "linux-archive itself is uninstalled as well" "" bash -c '[[ ! -e /opt/linux-archive ]]'
+else
+    t_skip "--remove-deps" "install.sh recorded no packages in this image"
+fi
+
 t_summary
 exit $(( FAIL > 0 ))

@@ -58,3 +58,27 @@ environment variable is accepted; passwords still use the hidden prompt.
 
 `larc` accepts precisely the same arguments and runs the same installed script.
 Its help and version display `larc` when invoked through that name.
+
+### install.sh options
+
+| Option | Effect |
+|---|---|
+| `-y, --yes` | Never ask. Uses safe defaults and only the repositories that are already enabled. It **never** enables EPEL, a non-free component or RPM Fusion. |
+| `--with-nonfree` | Installs the real (non-free) `unrar` from Debian non-free, Ubuntu multiverse, RPM Fusion nonfree, openSUSE non-oss, or Arch `[extra]`. |
+| `--no-nonfree` | Never installs non-free software and never asks about it. |
+| `--with-epel` | On RHEL rebuilds, enables EPEL and CRB/PowerTools. They are needed there for 7-Zip, cabextract and dpkg. `--with-nonfree` implies this. |
+| `--dry-run` | Only shows what would be done. Root is not needed. |
+| `--with-setup` | Runs `setup.sh` after a successful installation. |
+| `--no-update` | Skips the package metadata refresh. |
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | OK |
+| 1 | A required tool is still missing |
+| 2 | Usage error |
+| 3 | Not root and no sudo |
+| 4 | Unsupported or unknown system |
+| 5 | Immutable system |
+| 6 | Package manager is busy (lock) or failing |

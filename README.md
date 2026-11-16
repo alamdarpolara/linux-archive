@@ -187,3 +187,35 @@ util-linux flock. linux-archive uses options that the BusyBox versions lack.
 4. A preview and a safety scan run before anything is extracted.
 5. The archive is extracted into a new folder named after it, with Overwrite,
    Rename or Skip if that folder exists.
+
+## Security model
+
+### Threat model
+
+- Local multi-user host where other users can read `ps` and `/proc`.
+- Malicious archives: path traversal, symlink/hard-link escapes, device nodes,
+  setuid files, zip bombs, file-count bombs, hostile file names.
+- Hostile environment variables.
+- Concurrent runs.
+- Root can always modify anything. That is out of scope.
+
+### Passwords
+
+- Passwords are read hidden with `read -rs`. When creating an archive, you
+  type the password twice.
+- They are never put in argv. They reach 7-Zip or `unrar` through a pipe from
+  the builtin `printf`, and the tool runs under `setsid`, so it has no tty.
+- They are never fed through a here-string or heredoc. bash before 5.1 backs
+  those with temp files.
+- They are never exported, written to disk or logged. The variable is
+  overwritten and unset after use.
+- Core dumps are off (`ulimit -c 0`) and history is off.
+- xtrace is forced off while a password is held, so `bash -x linux-archive.sh`
+  does not show it.
+- Tools that accept passwords only on argv are never used for encrypted
+  archives:
+  - Info-ZIP `zip -P` / `unzip -P`
+  - `unar -p`
+  - `bsdtar --passphrase`
+
+### Extraction

@@ -10,6 +10,7 @@ FAILED_NAMES=()
 t_ok()   { PASS=$((PASS+1)); if [[ -n ${2:-} ]]; then printf 'PASS  %s  -- %s\n' "$1" "$2"; else printf 'PASS  %s\n' "$1"; fi; }
 # t_bad <stable name> [detail]: record a failure. t_summary lists the name again.
 t_bad()  { FAIL=$((FAIL+1)); FAILED_NAMES+=("$1"); printf 'FAIL  %s  -- %s\n' "$1" "${2:-}"; }
+# t_skip <stable name> [detail]: record a skipped test; it is not a failure.
 t_skip() { SKIP=$((SKIP+1)); printf 'SKIP  %s  -- %s\n' "$1" "${2:-}"; }
 T_SEC_START=$SECONDS
 t_section() { printf '\n==== %s ====   [t+%ss]\n' "$1" "$(( SECONDS - T_SEC_START ))"; }

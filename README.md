@@ -419,6 +419,10 @@ image per distribution through the real `install.sh`, then runs:
 The root suite also runs `setup.sh` on a pseudo-terminal. Containers have no
 tty, so this is the only test that catches terminal-only hangs.
 
+Do not run `tests_root.sh` on a real machine. It edits `/etc`, `/opt`,
+`/usr/local` and `/var/lib`, so it belongs in a throw-away container, which is
+how `run_all.sh` runs it.
+
 ```sh
 cd linux-archive_test
 ./run_all.sh                       # all 15 distributions (see distros.sh)

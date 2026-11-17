@@ -13,9 +13,11 @@ t_bad()  { FAIL=$((FAIL+1)); FAILED_NAMES+=("$1"); printf 'FAIL  %s  -- %s\n' "$
 # t_skip <stable name> [detail]: record a skipped test; it is not a failure.
 t_skip() { SKIP=$((SKIP+1)); printf 'SKIP  %s  -- %s\n' "$1" "${2:-}"; }
 T_SEC_START=$SECONDS
+# t_section <title>: print a header with the seconds elapsed since this file was sourced.
 t_section() { printf '\n==== %s ====   [t+%ss]\n' "$1" "$(( SECONDS - T_SEC_START ))"; }
 
-# check <name> <detail-if-fails> <command...>
+# check <name> <detail-if-fails> <command...>: pass if the command exits 0.
+# Its stdout and stderr are discarded.
 check() {
     local name=$1 detail=$2
     shift 2

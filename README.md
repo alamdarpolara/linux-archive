@@ -99,6 +99,17 @@ Its help and version display `larc` when invoked through that name.
 - `--no-color` turns ANSI colours off. The `NO_COLOR` environment variable has
   the same effect.
 
+### linux-archive exit codes
+
+These exit codes apply to `--check`, `--verify`, `--help`, `--version` and to
+invalid usage:
+
+| Code | Meaning |
+|---|---|
+| 0 | `--help` and `--version`; `--check` with every tool present; `--verify` on an intact installation |
+| 1 | `--check` found a missing tool, or `--verify` found a modified installation |
+| 2 | Usage error, or `--verify` without a usable manifest (not installed with `setup.sh`) |
+
 ### install.sh options
 
 | Option | Effect |

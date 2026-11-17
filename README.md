@@ -441,6 +441,12 @@ sections instead of distributions: `static`, `cli`, `matrix`, `single`,
 `ONLY=matrix,cli ./tests.sh`. It runs as a normal user and works in `$T`, which
 defaults to `~/la_work`.
 
+The `static` section checks the syntax of every script and, when ShellCheck is
+installed, runs `shellcheck -S style -o all` over all four scripts. Every test
+prints a `PASS`, `FAIL` or `SKIP` line. The run ends with
+`==== SUMMARY: N passed, N failed, N skipped ====`, followed by the names of any
+failed tests, and `tests.sh` exits non-zero if anything failed.
+
 The full matrix has not been rerun since the latest two fixes (the cpio
 line-break check and the setup.sh pty test). Run it to verify this revision.
 

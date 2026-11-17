@@ -92,6 +92,13 @@ environment variable is accepted; passwords still use the hidden prompt.
 `larc` accepts precisely the same arguments and runs the same installed script.
 Its help and version display `larc` when invoked through that name.
 
+### Display options
+
+- `--plain` uses numbered menus instead of arrow-key menus. It is also chosen
+  automatically when the terminal cannot do cursor control.
+- `--no-color` turns ANSI colours off. The `NO_COLOR` environment variable has
+  the same effect.
+
 ### install.sh options
 
 | Option | Effect |

@@ -431,6 +431,12 @@ SKIP_BUILD=1 SKIP_INSTALL=1 ./run_all.sh   # reuse images, only root + main suit
 It needs docker or podman and never installs them. Each run writes local
 `logs/<distro>.log` and `logs/SUMMARY.txt`; generated logs are not published.
 
+Inside a test container, `tests.sh` has its own `ONLY` filter. It selects test
+sections instead of distributions: `static`, `cli`, `matrix`, `single`,
+`extract`, `negative`, `overwrite`, `security`, `leak` and `pty`. For example,
+`ONLY=matrix,cli ./tests.sh`. It runs as a normal user and works in `$T`, which
+defaults to `~/la_work`.
+
 The full matrix has not been rerun since the latest two fixes (the cpio
 line-break check and the setup.sh pty test). Run it to verify this revision.
 

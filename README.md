@@ -215,6 +215,19 @@ util-linux flock. linux-archive uses options that the BusyBox versions lack.
 
 ## What it does
 
+### Formats at a glance
+
+| Format | Create | Extract |
+|---|---|---|
+| zip, 7z, tar | yes | yes |
+| tar.gz (`tgz`), tar.bz2, tar.xz, tar.zst | yes | yes |
+| squashfs | yes | yes |
+| gz, xz, zst (one regular file) | yes | yes |
+| bz2, lz4, lzma | no | yes |
+| rar | no | yes |
+| iso, deb, rpm, cpio, ar/.a, cab | no | yes |
+| jar, war, apk | no | yes |
+
 ### Zip
 
 1. Pick one item or several items. Names with spaces, Unicode, quotes, a

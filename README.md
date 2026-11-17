@@ -433,3 +433,7 @@ It needs docker or podman and never installs them. Each run writes local
 
 The full matrix has not been rerun since the latest two fixes (the cpio
 line-break check and the setup.sh pty test). Run it to verify this revision.
+
+## License
+
+linux-archive is released under the MIT License. See [LICENSE](LICENSE).

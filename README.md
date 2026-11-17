@@ -24,6 +24,20 @@ linux-archive needs bash 4.4 or newer and these helper tools, which
 `file`, `setsid`, `flock` and `tput`. It also needs 7-Zip, a RAR extractor,
 and the GNU versions of tar, findutils, coreutils and util-linux.
 
+`--check` prints one line per tool and ends with a count. A missing tool is
+marked `[MISSING]` together with the package that provides it:
+
+```text
+linux-archive 2.0.0 - dependency check
+
+  [ok]      tar          /usr/bin/tar
+  [ok]      gzip         /usr/bin/gzip
+  [MISSING] lz4          package: lz4
+  ...
+
+22 present, 1 missing.  Run: sudo ./install.sh
+```
+
 ## Usage
 
 ```sh

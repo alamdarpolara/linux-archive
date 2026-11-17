@@ -1,6 +1,10 @@
+# Local build output
 build
+# Scratch RAR sample files
 linux-archive_test/samples/rar_dl/x_*
+# Generated test work trees
 linux-archive_test/work
 linux-archive_test/work_*
 
+# Repository metadata
 .git

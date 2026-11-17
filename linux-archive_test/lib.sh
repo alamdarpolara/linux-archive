@@ -30,7 +30,9 @@ t_summary() {
 }
 
 # ------------------------------------------------------------ test data
-# make_data <dir>: the standard data set (see the list in the report).
+# make_data <dir>: rebuild <dir> as the standard data set: documents, web files,
+# images, binary files, empty and deeply nested folders, files with unusual
+# names, symlinks, a hard-link pair and a tree of 600 small files.
 make_data() {
     local d=$1 i j
     rm -rf -- "$d"

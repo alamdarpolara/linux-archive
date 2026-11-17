@@ -6,6 +6,18 @@ menu, or use a subcommand to enter a flow directly. It is pure bash with ANSI
 colours and `tput`; it does not need `dialog`, `fzf` or `whiptail`. If the
 terminal can't do cursor control, it falls back to numbered menus.
 
+## Contents
+
+- [Files](#files)
+- [Usage](#usage)
+- [Supported distributions](#supported-distributions)
+- [What it does](#what-it-does)
+- [Security model](#security-model)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
+- [Tests](#tests)
+- [License](#license)
+
 ## Files
 
 | File | Purpose |

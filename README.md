@@ -110,6 +110,9 @@ invalid usage:
 | 1 | `--check` found a missing tool, or `--verify` found a modified installation |
 | 2 | Usage error, or `--verify` without a usable manifest (not installed with `setup.sh`) |
 
+If the input is closed while a prompt is waiting (for example with Ctrl+D),
+linux-archive prints `Input closed - exiting.` and exits with 1.
+
 ### install.sh options
 
 | Option | Effect |

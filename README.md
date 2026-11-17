@@ -366,6 +366,10 @@ Only official repositories are used.
 - **`--verify` reports that there is no manifest (exit code 2).** The manifest
   is written to `/var/lib/linux-archive/manifest` by `setup.sh`. Without it
   there is nothing to compare, so run `sudo ./setup.sh` first.
+- **linux-archive reports `Missing tool(s)`.** Run `sudo ./install.sh`; add
+  `--dry-run` first to preview what it would do.
+- **`install.sh` exits with code 5.** The system is immutable and was refused.
+  `linux-archive.sh` itself still runs there if the tools exist.
 
 ## Known limitations
 

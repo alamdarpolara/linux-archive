@@ -15,6 +15,15 @@ terminal can't do cursor control, it falls back to numbered menus.
 | `uninstall_setup.sh` | Removes everything `setup.sh` installed, plus optionally the packages that `install.sh` added. |
 | `linux-archive.sh` | The tool itself. It runs on its own with `./linux-archive.sh` and needs no setup. |
 
+### Requirements
+
+linux-archive needs bash 4.4 or newer and these helper tools, which
+`install.sh` installs for you and `linux-archive --check` reports on: `tar`,
+`gzip`, `bzip2`, `xz`, `zstd`, `lz4`, `zip`, `unzip`, `mksquashfs`,
+`unsquashfs`, `cabextract`, `rpm2cpio`, `cpio`, `ar`, `dpkg-deb`, `bsdtar`,
+`file`, `setsid`, `flock` and `tput`. It also needs 7-Zip, a RAR extractor,
+and the GNU versions of tar, findutils, coreutils and util-linux.
+
 ## Usage
 
 ```sh

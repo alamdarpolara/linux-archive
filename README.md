@@ -54,6 +54,16 @@ linux-archive unzip a.zip b.7z  # extract archives in the order specified
 sudo ./uninstall_setup.sh    # add --remove-deps to also remove packages install.sh added
 ```
 
+### Try it without installing
+
+`linux-archive.sh` needs no setup, so it can run straight from a checkout:
+
+```sh
+./install.sh --dry-run        # preview the dependency installation; no root needed
+./linux-archive.sh --check    # see which helper tools are present
+./linux-archive.sh zip        # start the Zip flow in the current folder
+```
+
 ### Direct commands
 
 | Invocation | Prompts retained |

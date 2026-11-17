@@ -355,6 +355,18 @@ Only official repositories are used.
   `distribution-gpg-keys` package, instead of the documented `--nogpgcheck`.
 - EPEL comes from the distribution's own signed extras repository.
 
+## Troubleshooting
+
+- **`sudo linux-archive` says the command is not found.** sudo's `secure_path`
+  must include `/usr/local/bin`. Otherwise run `sudo /usr/local/bin/linux-archive`.
+- **`larc` is missing after `setup.sh`.** An existing command or file named
+  `larc` is never overwritten. Setup warns, installs everything else and
+  records the collision. Inspect the reported command, move or rename it
+  yourself, then rerun `sudo ./setup.sh`.
+- **`--verify` reports that there is no manifest (exit code 2).** The manifest
+  is written to `/var/lib/linux-archive/manifest` by `setup.sh`. Without it
+  there is nothing to compare, so run `sudo ./setup.sh` first.
+
 ## Known limitations
 
 - **RAR:** creating RAR is not supported (proprietary format and licence).

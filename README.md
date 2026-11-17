@@ -447,6 +447,11 @@ prints a `PASS`, `FAIL` or `SKIP` line. The run ends with
 `==== SUMMARY: N passed, N failed, N skipped ====`, followed by the names of any
 failed tests, and `tests.sh` exits non-zero if anything failed.
 
+The pseudo-terminal checks live in `linux-archive_test/pty_test.py`, which
+`tests.sh` runs for you. Its usage is
+`pty_test.py <path-to-linux-archive.sh> <work-dir>`, and it prints the same
+`PASS`, `FAIL` and `SKIP` lines.
+
 The full matrix has not been rerun since the latest two fixes (the cpio
 line-break check and the setup.sh pty test). Run it to verify this revision.
 

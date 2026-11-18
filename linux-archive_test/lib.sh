@@ -124,10 +124,12 @@ fmt_num() {
     case $1 in zip) echo 1;; 7z) echo 2;; tar) echo 3;; tar.gz) echo 4;; tar.bz2) echo 5;; tar.xz) echo 6;;
         tar.zst) echo 7;; squashfs) echo 8;; gz) echo 9;; xz) echo 10;; zst) echo 11;; esac
 }
+# fmt_ext <format>: the file extension linux-archive adds to the archive name.
 fmt_ext() {
     case $1 in zip) echo .zip;; 7z) echo .7z;; tar) echo .tar;; tar.gz) echo .tar.gz;; tar.bz2) echo .tar.bz2;;
         tar.xz) echo .tar.xz;; tar.zst) echo .tar.zst;; squashfs) echo .squashfs;; gz) echo .gz;; xz) echo .xz;; zst) echo .zst;; esac
 }
+# fmt_nlevels <format>: how many compression levels the menu offers (0 = none).
 fmt_nlevels() {
     case $1 in zip) echo 5;; 7z) echo 6;; tar) echo 0;; tar.gz|tar.bz2|gz|squashfs) echo 4;; tar.xz|xz) echo 4;; tar.zst|zst) echo 5;; esac
 }

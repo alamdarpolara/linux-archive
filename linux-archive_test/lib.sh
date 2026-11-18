@@ -92,11 +92,13 @@ tree_meta() {
 tree_meta_text() {
     ( cd -- "$1" && find . -mindepth 1 -printf '%p\t%y\t%m\t%l\0' | LC_ALL=C sort -z | tr '\0' '\n' )
 }
+# tree_sums <dir>: one checksum over the SHA-256 sums of every regular file.
 tree_sums() {
     ( cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1 )
 }
 
 # same_tree <a> <b>: identical names/types/modes/link targets/contents?
+# On a mismatch it prints the first differences to stderr and returns 1.
 same_tree() {
     local a=$1 b=$2
     if [[ $(tree_meta "$a") == "$(tree_meta "$b")" && $(tree_sums "$a") == "$(tree_sums "$b")" ]]; then return 0; fi
